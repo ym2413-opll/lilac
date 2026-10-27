@@ -1,0 +1,6 @@
+build/obj/
+*.obj
+*.res
+*.exe
+build/Lilac.exe
+

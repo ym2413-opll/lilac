@@ -1,0 +1,85 @@
+#include <windows.h>
+#include "resource.h"
+
+#pragma code_page(65001)
+
+// Application Icon
+IDI_APPICON ICON "icon.ico"
+
+IDR_MAINMENU MENU
+BEGIN
+    POPUP "파일(&F)"
+    BEGIN
+        MENUITEM "열기(&O)...\tCtrl+O",             IDM_FILE_OPEN
+        MENUITEM SEPARATOR
+        MENUITEM "PDF로 내보내기(&P)...\tCtrl+P",     IDM_FILE_EXPORT_PDF
+        MENUITEM "DOCX로 내보내기(&D)...\tCtrl+D",    IDM_FILE_EXPORT_DOCX
+        MENUITEM SEPARATOR
+        MENUITEM ".md 파일 기본 연결 등록(&R)",      IDM_FILE_REGISTER
+        MENUITEM ".md 파일 기본 연결 해제(&U)",      IDM_FILE_UNREGISTER
+        MENUITEM SEPARATOR
+        MENUITEM "종료(&X)\tAlt+F4",                 IDM_FILE_EXIT
+    END
+    POPUP "보기(&V)"
+    BEGIN
+        MENUITEM "확대(&I)\tCtrl++",                 IDM_VIEW_ZOOMIN
+        MENUITEM "축소(&O)\tCtrl+-",                 IDM_VIEW_ZOOMOUT
+        MENUITEM "기본 크기(&0)\tCtrl+0",            IDM_VIEW_ZOOMRESET
+        MENUITEM SEPARATOR
+        MENUITEM "어둡게 보기(&D)\tCtrl+T",            IDM_VIEW_DARKMODE
+        MENUITEM SEPARATOR
+        MENUITEM "새로 고침(&R)\tF5",                IDM_VIEW_REFRESH
+    END
+    POPUP "설정(&S)"
+    BEGIN
+        MENUITEM "글꼴 설정(&F)...",                 IDM_SETTINGS_FONT
+        MENUITEM SEPARATOR
+        MENUITEM "일반 글꼴 (본문) 변경...",       IDM_SETTINGS_BODY_FONT
+        MENUITEM "고정폭 글꼴 (코드) 변경...",       IDM_SETTINGS_MONO_FONT
+        MENUITEM SEPARATOR
+        MENUITEM "기본 글꼴로 초기화(&R)",          IDM_SETTINGS_RESET_FONT
+    END
+    POPUP "도움말(&H)"
+    BEGIN
+        MENUITEM "정보(&A)...",             IDM_HELP_ABOUT
+    END
+END
+
+IDD_FONT_DIALOG DIALOGEX 0, 0, 320, 190
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "글꼴 및 대체 우선순위 설정"
+FONT 9, "맑은 고딕"
+BEGIN
+    GROUPBOX        "일반 글꼴 대체 우선순위 (본문, 제목, 표 등)", -1, 10, 10, 300, 68
+    LTEXT           "우선순위 체인 (쉼표로 구분하여 여러 글꼴 지정):", -1, 18, 24, 210, 10
+    EDITTEXT        IDC_EDIT_BODY_CHAIN, 18, 38, 220, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "글꼴 추가(&B)...", IDC_BTN_CHANGE_BODY, 243, 37, 60, 16
+    LTEXT           "- 첫 번째 글꼴이 우선 적용되며, 누락된 글자나 이모지는 다음 글꼴로 자동 표시됩니다.", -1, 18, 56, 285, 16
+
+    GROUPBOX        "고정폭 글꼴 대체 우선순위 (코드 블록, 인라인 코드)", -1, 10, 84, 300, 68
+    LTEXT           "우선순위 체인 (쉼표로 구분하여 여러 글꼴 지정):", -1, 18, 98, 210, 10
+    EDITTEXT        IDC_EDIT_MONO_CHAIN, 18, 112, 220, 14, ES_AUTOHSCROLL
+    PUSHBUTTON      "글꼴 추가(&M)...", IDC_BTN_CHANGE_MONO, 243, 111, 60, 16
+    LTEXT           "- 첫 번째 글꼴이 우선 적용되며, 누락된 글자나 이모지는 다음 글꼴로 자동 표시됩니다.", -1, 18, 130, 285, 16
+
+    PUSHBUTTON      "기본값으로 초기화(&R)", IDC_BTN_RESET, 10, 162, 95, 18
+    DEFPUSHBUTTON   "확인", IDOK, 205, 162, 50, 18
+    PUSHBUTTON      "취소", IDCANCEL, 260, 162, 50, 18
+END
+
+IDR_ACCEL ACCELERATORS
+BEGIN
+    "O",            IDM_FILE_OPEN,          VIRTKEY, CONTROL
+    "P",            IDM_FILE_EXPORT_PDF,    VIRTKEY, CONTROL
+    "D",            IDM_FILE_EXPORT_DOCX,   VIRTKEY, CONTROL
+    "S",            IDM_FILE_EXPORT_DOCX,   VIRTKEY, CONTROL
+    VK_OEM_PLUS,    IDM_VIEW_ZOOMIN,        VIRTKEY, CONTROL
+    VK_ADD,         IDM_VIEW_ZOOMIN,        VIRTKEY, CONTROL
+    VK_OEM_MINUS,   IDM_VIEW_ZOOMOUT,       VIRTKEY, CONTROL
+    VK_SUBTRACT,    IDM_VIEW_ZOOMOUT,       VIRTKEY, CONTROL
+    "0",            IDM_VIEW_ZOOMRESET,     VIRTKEY, CONTROL
+    "T",            IDM_VIEW_DARKMODE,      VIRTKEY, CONTROL
+    VK_F5,          IDM_VIEW_REFRESH,       VIRTKEY
+END
+
+1 24 "manifest.xml"
