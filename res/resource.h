@@ -12,6 +12,12 @@
 #define IDM_FILE_UNREGISTER 1005
 #define IDM_FILE_EXIT     1006
 
+#define IDM_EDIT_COPY           1011
+#define IDM_EDIT_SELECT_ALL     1012
+#define IDM_EDIT_FIND           1013
+#define IDM_EDIT_FIND_NEXT      1014
+#define IDM_EDIT_FIND_PREV      1015
+
 #define IDM_VIEW_ZOOMIN   1101
 #define IDM_VIEW_ZOOMOUT  1102
 #define IDM_VIEW_ZOOMRESET 1103
@@ -23,6 +29,15 @@
 #define IDM_SETTINGS_MONO_FONT  1303
 #define IDM_SETTINGS_RESET_FONT 1304
 
+#define IDM_RECENT_BASE         1400
+#define IDM_RECENT_FILE_1       1401
+#define IDM_RECENT_FILE_2       1402
+#define IDM_RECENT_FILE_3       1403
+#define IDM_RECENT_FILE_4       1404
+#define IDM_RECENT_FILE_5       1405
+#define IDM_RECENT_EMPTY        1406
+#define IDM_RECENT_CLEAR        1407
+
 #define IDM_HELP_ABOUT    1201
 
 #define IDD_FONT_DIALOG         2001
@@ -33,5 +48,11 @@
 #define IDC_BTN_RESET           2006
 #define IDC_EDIT_BODY_CHAIN     2007
 #define IDC_EDIT_MONO_CHAIN     2008
+
+#define IDC_SEARCH_EDIT         2101
+#define IDC_SEARCH_PREV         2102
+#define IDC_SEARCH_NEXT         2103
+#define IDC_SEARCH_CLOSE        2104
+#define IDC_SEARCH_STATIC       2105
 
 #endif

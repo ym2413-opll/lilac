@@ -11,6 +11,10 @@ BEGIN
     POPUP "파일(&F)"
     BEGIN
         MENUITEM "열기(&O)...\tCtrl+O",             IDM_FILE_OPEN
+        POPUP "최근 파일(&R)"
+        BEGIN
+            MENUITEM "(최근 파일 없음)",             IDM_RECENT_EMPTY, GRAYED
+        END
         MENUITEM SEPARATOR
         MENUITEM "PDF로 내보내기(&P)...\tCtrl+P",     IDM_FILE_EXPORT_PDF
         MENUITEM "DOCX로 내보내기(&D)...\tCtrl+D",    IDM_FILE_EXPORT_DOCX
@@ -19,6 +23,16 @@ BEGIN
         MENUITEM ".md 파일 기본 연결 해제(&U)",      IDM_FILE_UNREGISTER
         MENUITEM SEPARATOR
         MENUITEM "종료(&X)\tAlt+F4",                 IDM_FILE_EXIT
+    END
+    POPUP "편집(&E)"
+    BEGIN
+        MENUITEM "복사(&C)\tCtrl+C",                 IDM_EDIT_COPY
+        MENUITEM SEPARATOR
+        MENUITEM "모두 선택(&A)\tCtrl+A",            IDM_EDIT_SELECT_ALL
+        MENUITEM SEPARATOR
+        MENUITEM "찾기(&F)...\tCtrl+F",             IDM_EDIT_FIND
+        MENUITEM "다음 찾기(&N)\tF3",                IDM_EDIT_FIND_NEXT
+        MENUITEM "이전 찾기(&P)\tShift+F3",          IDM_EDIT_FIND_PREV
     END
     POPUP "보기(&V)"
     BEGIN
@@ -73,6 +87,11 @@ BEGIN
     "P",            IDM_FILE_EXPORT_PDF,    VIRTKEY, CONTROL
     "D",            IDM_FILE_EXPORT_DOCX,   VIRTKEY, CONTROL
     "S",            IDM_FILE_EXPORT_DOCX,   VIRTKEY, CONTROL
+    "F",            IDM_EDIT_FIND,          VIRTKEY, CONTROL
+    "C",            IDM_EDIT_COPY,          VIRTKEY, CONTROL
+    "A",            IDM_EDIT_SELECT_ALL,    VIRTKEY, CONTROL
+    VK_F3,          IDM_EDIT_FIND_NEXT,     VIRTKEY
+    VK_F3,          IDM_EDIT_FIND_PREV,     VIRTKEY, SHIFT
     VK_OEM_PLUS,    IDM_VIEW_ZOOMIN,        VIRTKEY, CONTROL
     VK_ADD,         IDM_VIEW_ZOOMIN,        VIRTKEY, CONTROL
     VK_OEM_MINUS,   IDM_VIEW_ZOOMOUT,       VIRTKEY, CONTROL

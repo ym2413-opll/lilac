@@ -441,6 +441,15 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
         free(lines);
     }
 
+    /* Append newline to Layout plain text so blocks are cleanly separated when copied or searched */
+    if (L->text && L->textlen > 0 && L->text[L->textlen - 1] != L'\n') {
+        if (L->textlen + 2 > L->textcap) {
+            L->textcap = L->textcap ? L->textcap * 2 : 512;
+            L->text = (wchar_t *)realloc(L->text, L->textcap * sizeof(wchar_t));
+        }
+        L->text[L->textlen++] = L'\n';
+    }
+
     free(glyphs);
 }
 
@@ -893,6 +902,14 @@ Layout *layout_build(Doc *doc, const LayoutOptions *opt)
         L->pageHeight = ctx.curY + opt->marginB;
     }
 
+    if (L->text) {
+        if (L->textlen >= L->textcap) {
+            L->textcap = L->textlen + 1;
+            L->text = (wchar_t *)realloc(L->text, L->textcap * sizeof(wchar_t));
+        }
+        L->text[L->textlen] = 0;
+    }
+
     return L;
 }
 
@@ -922,23 +939,50 @@ int layout_hit_link(const Layout *L, int page, float x, float y)
 int layout_hit_text(const Layout *L, int page, float x, float y)
 {
     int i, g;
-    if (!L) return -1;
+    int bestItem = -1;
+    float bestDy = 1e9f;
+    if (!L || L->textlen == 0) return -1;
+
+    /* 1. First pass: look for exact line hit */
     for (i = 0; i < L->nitems; i++) {
         const Item *it = &L->items[i];
-        if (it->type == IT_GLYPHS && it->page == page) {
-            if (y >= it->y - it->size && y <= it->y + it->size * 0.5f) {
-                if (x >= it->x && x <= it->x + it->w) {
-                    float cur = it->x;
-                    for (g = 0; g < it->n; g++) {
-                        float gw = (g + 1 < it->n ? it->dx[g + 1] : it->w) - it->dx[g];
-                        if (x <= cur + gw) return it->toff[g];
-                        cur += gw;
-                    }
-                    return it->tend;
+        if (it->type == IT_GLYPHS && it->page == page && it->n > 0) {
+            float top = it->y - it->size;
+            float bottom = it->y + it->size * 0.45f;
+            if (y >= top && y <= bottom) {
+                if (x <= it->x) return it->toff[0];
+                if (x >= it->x + it->w) return it->tend;
+                float cur = it->x;
+                for (g = 0; g < it->n; g++) {
+                    float gw = (g + 1 < it->n ? it->dx[g + 1] : it->w) - it->dx[g];
+                    if (x <= cur + gw * 0.6f) return it->toff[g];
+                    cur += gw;
                 }
+                return it->tend;
+            }
+            /* Track closest item vertically */
+            float dy = (y < top) ? (top - y) : (y - bottom);
+            if (dy < bestDy) {
+                bestDy = dy;
+                bestItem = i;
             }
         }
     }
+
+    /* 2. Second pass: fallback to closest item vertically */
+    if (bestItem >= 0) {
+        const Item *it = &L->items[bestItem];
+        if (x <= it->x) return it->toff[0];
+        if (x >= it->x + it->w) return it->tend;
+        float cur = it->x;
+        for (g = 0; g < it->n; g++) {
+            float gw = (g + 1 < it->n ? it->dx[g + 1] : it->w) - it->dx[g];
+            if (x <= cur + gw * 0.6f) return it->toff[g];
+            cur += gw;
+        }
+        return it->tend;
+    }
+
     return -1;
 }
 
@@ -955,14 +999,24 @@ const Anchor *layout_find_anchor(const Layout *L, const wchar_t *name)
 int layout_text_pos(const Layout *L, int off, int *page, float *x, float *y)
 {
     int i, g;
-    if (!L) return -1;
+    if (!L || L->nitems == 0) return -1;
     for (i = 0; i < L->nitems; i++) {
         const Item *it = &L->items[i];
-        if (it->type == IT_GLYPHS) {
-            for (g = 0; g < it->n; g++) {
-                if (it->toff[g] == off) {
+        if (it->type == IT_GLYPHS && it->n > 0) {
+            if (off >= it->toff[0] && off <= it->tend) {
+                for (g = 0; g < it->n; g++) {
+                    int nextOff = (g + 1 < it->n) ? it->toff[g + 1] : it->tend;
+                    if (off >= it->toff[g] && off < nextOff) {
+                        if (page) *page = it->page;
+                        if (x) *x = it->x + (it->dx ? it->dx[g] : 0);
+                        if (y) *y = it->y;
+                        return 0;
+                    }
+                }
+                /* If exactly at tend */
+                if (off == it->tend) {
                     if (page) *page = it->page;
-                    if (x) *x = it->x + it->dx[g];
+                    if (x) *x = it->x + it->w;
                     if (y) *y = it->y;
                     return 0;
                 }
