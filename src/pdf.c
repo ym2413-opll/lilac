@@ -15,11 +15,12 @@
 #define MAX_PDF_OBJS 4096
 
 typedef struct PdfWriter {
-    Buf      buf;
-    uint32_t xref[MAX_PDF_OBJS];
-    int      nextObj;
-    int      pageObjs[256];
-    int      pageCount;
+    Buf       buf;
+    uint32_t* xref;
+	int       maxObj;
+    int       nextObj;
+    int*      pageObjs;
+    int       pageCount;
 } PdfWriter;
 
 static int pdf_new_obj(PdfWriter *pw)
@@ -320,6 +321,9 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
 
     memset(&pw, 0, sizeof pw);
     buf_puts(&pw.buf, "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n\n");
+	
+	pw.maxObj = 4096;
+	pw.xref = calloc(pw.maxObj, sizeof(uint32_t));
 
     ptW = L->pageWidth * 0.75f;
     ptH = L->pageHeight * 0.75f;
@@ -539,7 +543,8 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
 
     /* 4. Pages and Content Streams */
     pw.pageCount = L->npages;
-    pagesObj = ++pw.nextObj; /* Reserve object ID for Pages catalog */
+	pw.pageObjs  = calloc(L->npages, sizeof(int));
+    pagesObj     = ++pw.nextObj; /* Reserve object ID for Pages catalog */
 
     for (p = 0; p < L->npages; p++) {
         Buf content = {0};

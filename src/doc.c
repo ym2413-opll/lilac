@@ -1152,7 +1152,7 @@ Doc *doc_load_file(const wchar_t *path)
 
 static int is_remote(const wchar_t *s)
 {
-    return !_wcsnicmp(s, L"http://", 7) || !_wcsnicmp(s, L"https://", 8);
+    return !_wcsnicmp(s, L"http://", 7) || !_wcsnicmp(s, L"https://", 8) || !_wcsnicmp(s, L"\\\\", 2) || !_wcsnicmp(s, L"//", 2) || !_wcsnicmp(s, L"file://", 7);
 }
 
 /* Resolve an image src to an image cache key. Returns malloc()ed string or NULL. */
