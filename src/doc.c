@@ -1111,10 +1111,21 @@ Doc *doc_load_file(const wchar_t *path)
     char *utf8 = NULL;
     int ulen = 0;
     Doc *doc;
-    wchar_t full[MAX_PATH * 4];
+    wchar_t *fullPath = NULL;
+    DWORD fn = GetFullPathNameW(path, 0, NULL, NULL);
 
-    if (GetFullPathNameW(path, MAX_PATH * 4, full, NULL)) path = full;
-    if (file_read_all(path, &data, &len)) return NULL;
+    if (fn > 0) {
+        fullPath = (wchar_t *)malloc(fn * sizeof(wchar_t));
+        if (fullPath) {
+            if (GetFullPathNameW(path, fn, fullPath, NULL) > 0) path = fullPath;
+            else { free(fullPath); fullPath = NULL; }
+        }
+    }
+
+    if (file_read_all(path, &data, &len)) {
+        free(fullPath);
+        return NULL;
+    }
 
     if (len >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
         utf8 = (char *)malloc(len - 3 + 1);
@@ -1147,12 +1158,13 @@ Doc *doc_load_file(const wchar_t *path)
     free(data);
     doc = doc_parse(utf8, (size_t)ulen, path);
     free(utf8);
+    free(fullPath);
     return doc;
 }
 
 static int is_remote(const wchar_t *s)
 {
-    return !_wcsnicmp(s, L"http://", 7) || !_wcsnicmp(s, L"https://", 8) || !_wcsnicmp(s, L"\\\\", 2) || !_wcsnicmp(s, L"//", 2) || !_wcsnicmp(s, L"file://", 7);
+    return path_is_remote(s);
 }
 
 /* Resolve an image src to an image cache key. Returns malloc()ed string or NULL. */
@@ -1161,23 +1173,38 @@ static wchar_t *resolve_image_key(Doc *doc, const wchar_t *src)
     WBuf wb = {0};
     int i, n;
     wchar_t *res;
+    const wchar_t *p;
+
     if (!src || !src[0]) return NULL;
-    if (is_remote(src) || !_wcsnicmp(src, L"data:", 5)) return _wcsdup(src);
-    if (!_wcsnicmp(src, L"file:///", 8)) src += 8;
-    else if (!_wcsnicmp(src, L"file://", 7)) src += 7;
+    if (!_wcsnicmp(src, L"data:", 5)) return _wcsdup(src);
+    if (!_wcsnicmp(src, L"http://", 7) || !_wcsnicmp(src, L"https://", 8)) return _wcsdup(src);
+
+    p = src;
+    if (!_wcsnicmp(p, L"file:///", 8)) {
+        p += 8;
+    } else if (!_wcsnicmp(p, L"file://localhost/", 17)) {
+        p += 17;
+    } else if (!_wcsnicmp(p, L"file://", 7)) {
+        return _wcsdup(src);
+    } else if (!_wcsnicmp(p, L"file:", 5)) {
+        p += 5;
+    }
+
     /* strip query / fragment, percent-decode (as UTF-8) */
-    n = (int)wcslen(src);
-    for (i = 0; i < n; i++) if (src[i] == '?' || src[i] == '#') { n = i; break; }
+    n = (int)wcslen(p);
+    for (i = 0; i < n; i++) if (p[i] == '?' || p[i] == '#') { n = i; break; }
     {
         Buf b = {0};
-        char *u = utf16_to_utf8(src, n, NULL);
-        int k, ul = (int)strlen(u);
+        char *u = utf16_to_utf8(p, n, NULL);
+        int k, ul = u ? (int)strlen(u) : 0;
         for (k = 0; k < ul; k++) {
             if (u[k] == '%' && k + 2 < ul && isxdigit((unsigned char)u[k + 1]) && isxdigit((unsigned char)u[k + 2])) {
                 char hx[3] = { u[k + 1], u[k + 2], 0 };
                 buf_putc(&b, (char)strtol(hx, NULL, 16));
                 k += 2;
-            } else buf_putc(&b, u[k]);
+            } else {
+                buf_putc(&b, u[k]);
+            }
         }
         free(u);
         {
@@ -1187,8 +1214,22 @@ static wchar_t *resolve_image_key(Doc *doc, const wchar_t *src)
         }
         buf_free(&b);
     }
+
+    /* Check decoded path for UNC/remote BEFORE path_join */
+    if (wb.p && path_is_remote(wb.p)) {
+        res = _wcsdup(wb.p);
+        wbuf_free(&wb);
+        return res;
+    }
+
     res = path_join(doc->dir, wb.p ? wb.p : L"");
     wbuf_free(&wb);
+
+    /* Also check final resolved path */
+    if (res && path_is_remote(res)) {
+        return res;
+    }
+
     return res;
 }
 
