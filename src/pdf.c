@@ -15,19 +15,35 @@
 #define MAX_PDF_OBJS 4096
 
 typedef struct PdfWriter {
-    Buf      buf;
-    uint32_t xref[MAX_PDF_OBJS];
-    int      nextObj;
-    int      pageObjs[256];
-    int      pageCount;
+    Buf       buf;
+    uint32_t* xref;
+	int       maxObj;
+    int       nextObj;
+    int*      pageObjs;
+    int       pageCount;
 } PdfWriter;
+
+static void ensure_xref_capacity(PdfWriter *pw, int id)
+{
+    if (id >= pw->maxObj) {
+        int newCap = pw->maxObj ? pw->maxObj * 2 : 4096;
+        while (newCap <= id) newCap *= 2;
+        uint32_t *reallocated = (uint32_t *)realloc(pw->xref, (size_t)newCap * sizeof(uint32_t));
+        if (!reallocated) {
+            fprintf(stderr, "out of memory\n");
+            abort();
+        }
+        memset(reallocated + pw->maxObj, 0, ((size_t)newCap - pw->maxObj) * sizeof(uint32_t));
+        pw->xref = reallocated;
+        pw->maxObj = newCap;
+    }
+}
 
 static int pdf_new_obj(PdfWriter *pw)
 {
     int id = ++pw->nextObj;
-    if (id < MAX_PDF_OBJS) {
-        pw->xref[id] = (uint32_t)pw->buf.n;
-    }
+    ensure_xref_capacity(pw, id);
+    pw->xref[id] = (uint32_t)pw->buf.n;
     buf_printf(&pw->buf, "%d 0 obj\n", id);
     return id;
 }
@@ -320,6 +336,13 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
 
     memset(&pw, 0, sizeof pw);
     buf_puts(&pw.buf, "%PDF-1.7\n%\xE2\xE3\xCF\xD3\n\n");
+	
+    pw.maxObj = 4096;
+    pw.xref = (uint32_t *)calloc(pw.maxObj, sizeof(uint32_t));
+    if (!pw.xref) {
+        fprintf(stderr, "out of memory\n");
+        abort();
+    }
 
     ptW = L->pageWidth * 0.75f;
     ptH = L->pageHeight * 0.75f;
@@ -539,7 +562,13 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
 
     /* 4. Pages and Content Streams */
     pw.pageCount = L->npages;
-    pagesObj = ++pw.nextObj; /* Reserve object ID for Pages catalog */
+    pw.pageObjs  = (int *)calloc(L->npages > 0 ? L->npages : 1, sizeof(int));
+    if (!pw.pageObjs) {
+        fprintf(stderr, "out of memory\n");
+        abort();
+    }
+    pagesObj     = ++pw.nextObj; /* Reserve object ID for Pages catalog */
+    ensure_xref_capacity(&pw, pagesObj);
 
     for (p = 0; p < L->npages; p++) {
         Buf content = {0};
@@ -813,6 +842,8 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
     free(usedGlyphs);
     free(fontType0Objs);
     free(imageObjs);
+    free(pw.pageObjs);
+    free(pw.xref);
 
     /* Write to file */
     if (file_write_all(path, pw.buf.p, pw.buf.n) != 0) {

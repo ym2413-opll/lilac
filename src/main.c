@@ -29,11 +29,13 @@ static const wchar_t g_sampleMarkdown[] =
     L"# Lilac - Markdown 뷰어\n\n"
     L"이 페이지는 파일을 열기 전 기본으로 표시되는 페이지입니다. 위쪽 메뉴에서 Markdown 파일을 열어 주십시오.\n";
 
+#define LONG_PATH_MAX 32768
+
 typedef struct AppState {
     HWND    hWnd;
     Doc    *doc;
     Layout *layout;
-    wchar_t currentPath[MAX_PATH];
+    wchar_t currentPath[LONG_PATH_MAX];
     float   baseSize;
     int     darkMode;
     int     scrollY;
@@ -57,7 +59,7 @@ typedef struct AppState {
 static AppState g_app;
 
 #define MAX_RECENT 5
-static wchar_t g_recentFiles[MAX_RECENT][MAX_PATH];
+static wchar_t g_recentFiles[MAX_RECENT][LONG_PATH_MAX];
 static int     g_recentCount = 0;
 
 typedef struct SearchMatch {
@@ -179,7 +181,7 @@ static void settings_load(void)
             for (i = 0; i < count; i++) {
                 wchar_t keyName[32];
                 swprintf_s(keyName, 32, L"RecentFile%d", i);
-                sz = MAX_PATH * sizeof(wchar_t);
+                sz = sizeof(g_recentFiles[g_recentCount]);
                 if (RegQueryValueExW(hKey, keyName, NULL, NULL, (LPBYTE)g_recentFiles[g_recentCount], &sz) == ERROR_SUCCESS) {
                     if (g_recentFiles[g_recentCount][0]) g_recentCount++;
                 }
@@ -221,36 +223,46 @@ static void settings_save(void)
 static void recent_add(const wchar_t *path)
 {
     int i, found = -1;
-    wchar_t fullPath[MAX_PATH];
+    wchar_t *fullPath = NULL;
+    DWORD fn;
     if (!path || !path[0]) return;
 
-    if (GetFullPathNameW(path, MAX_PATH, fullPath, NULL) == 0) {
-        wcsncpy_s(fullPath, MAX_PATH, path, _TRUNCATE);
+    fn = GetFullPathNameW(path, 0, NULL, NULL);
+    if (fn > 0) {
+        fullPath = (wchar_t *)malloc(fn * sizeof(wchar_t));
+        if (fullPath) {
+            if (GetFullPathNameW(path, fn, fullPath, NULL) == 0) {
+                free(fullPath);
+                fullPath = NULL;
+            }
+        }
     }
+    const wchar_t *targetPath = fullPath ? fullPath : path;
 
     for (i = 0; i < g_recentCount; i++) {
-        if (!_wcsicmp(g_recentFiles[i], fullPath)) {
+        if (!_wcsicmp(g_recentFiles[i], targetPath)) {
             found = i;
             break;
         }
     }
 
     if (found >= 0) {
-        wchar_t tmp[MAX_PATH];
-        wcsncpy_s(tmp, MAX_PATH, g_recentFiles[found], _TRUNCATE);
+        wchar_t *tmp = _wcsdup(g_recentFiles[found]);
         for (i = found; i > 0; i--) {
-            wcsncpy_s(g_recentFiles[i], MAX_PATH, g_recentFiles[i - 1], _TRUNCATE);
+            wcsncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i - 1], _TRUNCATE);
         }
-        wcsncpy_s(g_recentFiles[0], MAX_PATH, tmp, _TRUNCATE);
+        wcsncpy_s(g_recentFiles[0], LONG_PATH_MAX, tmp ? tmp : targetPath, _TRUNCATE);
+        free(tmp);
     } else {
         int count = g_recentCount < MAX_RECENT ? g_recentCount : MAX_RECENT - 1;
         for (i = count; i > 0; i--) {
-            wcsncpy_s(g_recentFiles[i], MAX_PATH, g_recentFiles[i - 1], _TRUNCATE);
+            wcsncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i - 1], _TRUNCATE);
         }
-        wcsncpy_s(g_recentFiles[0], MAX_PATH, fullPath, _TRUNCATE);
+        wcsncpy_s(g_recentFiles[0], LONG_PATH_MAX, targetPath, _TRUNCATE);
         if (g_recentCount < MAX_RECENT) g_recentCount++;
     }
 
+    free(fullPath);
     settings_save();
     update_recent_menu();
 }
@@ -260,7 +272,7 @@ static void recent_remove(int idx)
     int i;
     if (idx < 0 || idx >= g_recentCount) return;
     for (i = idx; i < g_recentCount - 1; i++) {
-        wcsncpy_s(g_recentFiles[i], MAX_PATH, g_recentFiles[i + 1], _TRUNCATE);
+        wcsncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i + 1], _TRUNCATE);
     }
     g_recentCount--;
     settings_save();
@@ -286,9 +298,13 @@ static void update_recent_menu(void)
     } else {
         int i;
         for (i = 0; i < g_recentCount; i++) {
-            wchar_t itemText[MAX_PATH + 16];
-            swprintf_s(itemText, MAX_PATH + 16, L"&%d. %ls", i + 1, g_recentFiles[i]);
-            AppendMenuW(hRecentMenu, MF_STRING, IDM_RECENT_FILE_1 + i, itemText);
+            size_t tlen = wcslen(g_recentFiles[i]) + 32;
+            wchar_t *itemText = (wchar_t *)malloc(tlen * sizeof(wchar_t));
+            if (itemText) {
+                swprintf_s(itemText, tlen, L"&%d. %ls", i + 1, g_recentFiles[i]);
+                AppendMenuW(hRecentMenu, MF_STRING, IDM_RECENT_FILE_1 + i, itemText);
+                free(itemText);
+            }
         }
         AppendMenuW(hRecentMenu, MF_SEPARATOR, 0, NULL);
         AppendMenuW(hRecentMenu, MF_STRING, IDM_RECENT_CLEAR, L"목록 지우기(&C)");
@@ -890,15 +906,21 @@ static void open_file(const wchar_t *path)
 {
     Doc *newDoc = doc_load_file(path);
     if (!newDoc) {
-        wchar_t msg[MAX_PATH + 64];
-        swprintf(msg, MAX_PATH + 64, L"파일을 열 수 없습니다:\n%ls", path);
-        MessageBoxW(g_app.hWnd, msg, L"오류", MB_OK | MB_ICONERROR);
+        size_t mlen = wcslen(path) + 128;
+        wchar_t *msg = (wchar_t *)malloc(mlen * sizeof(wchar_t));
+        if (msg) {
+            swprintf(msg, mlen, L"파일을 열 수 없습니다:\n%ls", path);
+            MessageBoxW(g_app.hWnd, msg, L"오류", MB_OK | MB_ICONERROR);
+            free(msg);
+        } else {
+            MessageBoxW(g_app.hWnd, L"파일을 열 수 없습니다.", L"오류", MB_OK | MB_ICONERROR);
+        }
         return;
     }
 
     if (g_app.doc) doc_free(g_app.doc);
     g_app.doc = newDoc;
-    wcsncpy_s(g_app.currentPath, MAX_PATH, path, _TRUNCATE);
+    wcsncpy_s(g_app.currentPath, LONG_PATH_MAX, path, _TRUNCATE);
     doc_resolve_images(g_app.doc, 0);
 
     recent_add(path);
@@ -1442,9 +1464,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_DROPFILES: {
         HDROP hDrop = (HDROP)wParam;
-        wchar_t dropped[MAX_PATH];
-        if (DragQueryFileW(hDrop, 0, dropped, MAX_PATH)) {
-            open_file(dropped);
+        UINT len = DragQueryFileW(hDrop, 0, NULL, 0);
+        if (len > 0) {
+            wchar_t *dropped = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
+            if (dropped) {
+                if (DragQueryFileW(hDrop, 0, dropped, len + 1)) {
+                    open_file(dropped);
+                }
+                free(dropped);
+            }
         }
         DragFinish(hDrop);
         return 0;
@@ -1454,16 +1482,18 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         switch (LOWORD(wParam)) {
         case IDM_FILE_OPEN: {
             OPENFILENAMEW ofn = {0};
-            wchar_t fileBuf[MAX_PATH] = {0};
+            wchar_t *fileBuf = (wchar_t *)calloc(LONG_PATH_MAX, sizeof(wchar_t));
+            if (!fileBuf) return 0;
             ofn.lStructSize = sizeof(ofn);
             ofn.hwndOwner = hWnd;
             ofn.lpstrFilter = L"Markdown 문서 (*.md;*.markdown;*.txt)\0*.md;*.markdown;*.mdown;*.txt\0모든 파일 (*.*)\0*.*\0";
             ofn.lpstrFile = fileBuf;
-            ofn.nMaxFile = MAX_PATH;
+            ofn.nMaxFile = LONG_PATH_MAX;
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (GetOpenFileNameW(&ofn)) {
                 open_file(fileBuf);
             }
+            free(fileBuf);
             return 0;
         }
 
@@ -1478,9 +1508,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 if (GetFileAttributesW(g_recentFiles[idx]) != INVALID_FILE_ATTRIBUTES) {
                     open_file(g_recentFiles[idx]);
                 } else {
-                    wchar_t msg[MAX_PATH + 64];
-                    swprintf(msg, MAX_PATH + 64, L"파일을 찾을 수 없습니다:\n%ls\n\n최근 파일 목록에서 제거합니다.", g_recentFiles[idx]);
-                    MessageBoxW(hWnd, msg, L"파일 없음", MB_OK | MB_ICONWARNING);
+                    size_t mlen = wcslen(g_recentFiles[idx]) + 128;
+                    wchar_t *msg = (wchar_t *)malloc(mlen * sizeof(wchar_t));
+                    if (msg) {
+                        swprintf(msg, mlen, L"파일을 찾을 수 없습니다:\n%ls\n\n최근 파일 목록에서 제거합니다.", g_recentFiles[idx]);
+                        MessageBoxW(hWnd, msg, L"파일 없음", MB_OK | MB_ICONWARNING);
+                        free(msg);
+                    }
                     recent_remove(idx);
                 }
             }
@@ -1523,20 +1557,21 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         case IDM_FILE_EXPORT_PDF: {
             OPENFILENAMEW ofn = {0};
-            wchar_t fileBuf[MAX_PATH] = {0};
+            wchar_t *fileBuf = (wchar_t *)calloc(LONG_PATH_MAX, sizeof(wchar_t));
             wchar_t err[256] = {0};
+            if (!fileBuf) return 0;
             if (g_app.currentPath[0]) {
                 wchar_t *defName = path_with_ext(path_name(g_app.currentPath), L".pdf");
-                wcsncpy_s(fileBuf, MAX_PATH, defName, _TRUNCATE);
+                wcsncpy_s(fileBuf, LONG_PATH_MAX, defName, _TRUNCATE);
                 free(defName);
             } else {
-                wcscpy_s(fileBuf, MAX_PATH, L"Document.pdf");
+                wcscpy_s(fileBuf, LONG_PATH_MAX, L"Document.pdf");
             }
             ofn.lStructSize = sizeof(ofn);
             ofn.hwndOwner = hWnd;
             ofn.lpstrFilter = L"PDF 문서 (*.pdf)\0*.pdf\0모든 파일 (*.*)\0*.*\0";
             ofn.lpstrFile = fileBuf;
-            ofn.nMaxFile = MAX_PATH;
+            ofn.nMaxFile = LONG_PATH_MAX;
             ofn.lpstrDefExt = L"pdf";
             ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
             if (GetSaveFileNameW(&ofn)) {
@@ -1546,25 +1581,27 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     MessageBoxW(hWnd, err[0] ? err : L"PDF 내보내기 실패", L"오류", MB_OK | MB_ICONERROR);
                 }
             }
+            free(fileBuf);
             return 0;
         }
 
         case IDM_FILE_EXPORT_DOCX: {
             OPENFILENAMEW ofn = {0};
-            wchar_t fileBuf[MAX_PATH] = {0};
+            wchar_t *fileBuf = (wchar_t *)calloc(LONG_PATH_MAX, sizeof(wchar_t));
             wchar_t err[256] = {0};
+            if (!fileBuf) return 0;
             if (g_app.currentPath[0]) {
                 wchar_t *defName = path_with_ext(path_name(g_app.currentPath), L".docx");
-                wcsncpy_s(fileBuf, MAX_PATH, defName, _TRUNCATE);
+                wcsncpy_s(fileBuf, LONG_PATH_MAX, defName, _TRUNCATE);
                 free(defName);
             } else {
-                wcscpy_s(fileBuf, MAX_PATH, L"Document.docx");
+                wcscpy_s(fileBuf, LONG_PATH_MAX, L"Document.docx");
             }
             ofn.lStructSize = sizeof(ofn);
             ofn.hwndOwner = hWnd;
             ofn.lpstrFilter = L"Microsoft Word 문서 (*.docx)\0*.docx\0모든 파일 (*.*)\0*.*\0";
             ofn.lpstrFile = fileBuf;
-            ofn.nMaxFile = MAX_PATH;
+            ofn.nMaxFile = LONG_PATH_MAX;
             ofn.lpstrDefExt = L"docx";
             ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
             if (GetSaveFileNameW(&ofn)) {
@@ -1574,6 +1611,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     MessageBoxW(hWnd, err[0] ? err : L"DOCX 내보내기 실패", L"오류", MB_OK | MB_ICONERROR);
                 }
             }
+            free(fileBuf);
             return 0;
         }
 
@@ -1664,7 +1702,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_HELP_ABOUT:
             MessageBoxW(hWnd,
                         L"Lilac the Markdown Viewer\n\n"
-                        L"by ym2413-opll, Version 1.1.0\n",
+                        L"by ym2413-opll, Version 1.1.1\n",
                         L"정보", MB_OK | MB_ICONINFORMATION);
             return 0;
         }

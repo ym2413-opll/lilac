@@ -264,6 +264,14 @@ Image *imagecache_get(ImageCache *c, const wchar_t *key, int allowRemote)
         } else {
             img->pending = 1;
         }
+    } else if (path_is_remote(key)) {
+        /* Remote UNC or network device path: block local file I/O to prevent NTLM credential leak */
+        if (!allowRemote) {
+            img->pending = 1;
+        } else {
+            /* Block UNC SMB access even during export to prevent credential theft */
+            img->failed = 1;
+        }
     } else {
         uint8_t *data = NULL;
         size_t len = 0;

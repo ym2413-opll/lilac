@@ -71,6 +71,8 @@ const wchar_t *path_name(const wchar_t *path);
 wchar_t *path_join(const wchar_t *dir, const wchar_t *rel);
 /* Replace extension (ext includes dot, e.g. L".pdf"); malloc()ed. */
 wchar_t *path_with_ext(const wchar_t *path, const wchar_t *ext);
+/* Returns 1 if path is a remote URL (http/https), UNC path (\\ or //), device path, or file:// with host. */
+int      path_is_remote(const wchar_t *path);
 
 /* ---------- Compression ---------- */
 /* zlib-wrapped deflate (RFC 1950) - for PDF FlateDecode. Returns length, *out malloc()ed. */

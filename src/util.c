@@ -319,7 +319,6 @@ const wchar_t *path_name(const wchar_t *path)
 wchar_t *path_join(const wchar_t *dir, const wchar_t *rel)
 {
     WBuf b = {0};
-    wchar_t full[MAX_PATH * 4];
     DWORD n;
     int i;
     if (!rel) rel = L"";
@@ -334,11 +333,17 @@ wchar_t *path_join(const wchar_t *dir, const wchar_t *rel)
         wbuf_put(&b, rel, -1);
     }
     for (i = 0; i < b.n; i++) if (b.p[i] == '/') b.p[i] = '\\';
-    n = GetFullPathNameW(b.p, (DWORD)(sizeof full / sizeof full[0]), full, NULL);
-    if (n > 0 && n < sizeof full / sizeof full[0]) {
-        wchar_t *r = _wcsdup(full);
-        wbuf_free(&b);
-        return r;
+    n = GetFullPathNameW(b.p, 0, NULL, NULL);
+    if (n > 0) {
+        wchar_t *r = (wchar_t *)malloc(n * sizeof(wchar_t));
+        if (r) {
+            DWORD actual = GetFullPathNameW(b.p, n, r, NULL);
+            if (actual > 0 && actual < n) {
+                wbuf_free(&b);
+                return r;
+            }
+            free(r);
+        }
     }
     return b.p;
 }
@@ -353,6 +358,48 @@ wchar_t *path_with_ext(const wchar_t *path, const wchar_t *ext)
     memcpy(r, path, base * sizeof(wchar_t));
     memcpy(r + base, ext, (el + 1) * sizeof(wchar_t));
     return r;
+}
+
+int path_is_remote(const wchar_t *s)
+{
+    if (!s) return 0;
+    while (*s == L' ' || *s == L'\t' || *s == L'\r' || *s == L'\n') s++;
+    if (!*s) return 0;
+
+    /* HTTP or HTTPS */
+    if (!_wcsnicmp(s, L"http://", 7) || !_wcsnicmp(s, L"https://", 8))
+        return 1;
+
+    /* UNC or network path: \\ or // or \/ or /\ */
+    if ((s[0] == L'\\' || s[0] == L'/') && (s[1] == L'\\' || s[1] == L'/'))
+        return 1;
+
+    /* Device paths: \\?\ or \\.\ or //?/ or //./ */
+    if ((s[0] == L'\\' || s[0] == L'/') && (s[1] == L'\\' || s[1] == L'/') &&
+        (s[2] == L'?' || s[2] == L'.') && (s[3] == L'\\' || s[3] == L'/'))
+        return 1;
+
+    /* file:// with host or UNC (e.g. file://host/..., file:////...) */
+    if (!_wcsnicmp(s, L"file:", 5)) {
+        const wchar_t *p = s + 5;
+        if (!_wcsnicmp(p, L"///", 3)) {
+            p += 3;
+            if ((p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/'))
+                return 1;
+            return 0;
+        } else if (!_wcsnicmp(p, L"//localhost/", 12)) {
+            p += 12;
+            if ((p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/'))
+                return 1;
+            return 0;
+        } else if (!_wcsnicmp(p, L"//", 2)) {
+            return 1;
+        } else if ((p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/')) {
+            return 1;
+        }
+    }
+
+    return 0;
 }
 
 /* ---------------- Compression ---------------- */
