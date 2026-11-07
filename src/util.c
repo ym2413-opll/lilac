@@ -258,14 +258,16 @@ uint32_t utf16_next(const wchar_t *s, int len, int *i)
 
 int file_read_all(const wchar_t *path, uint8_t **data, size_t *len)
 {
-    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    HANDLE h;
     LARGE_INTEGER sz;
     uint8_t *p;
     DWORD got = 0;
     size_t total = 0;
+    if (!path || !path[0]) return -1;
+    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
     if (h == INVALID_HANDLE_VALUE) return -1;
-    if (!GetFileSizeEx(h, &sz) || sz.QuadPart > 0x7FFFFFFF) { CloseHandle(h); return -1; }
+    if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 0 || sz.QuadPart > 0x10000000) { CloseHandle(h); return -1; }
     p = (uint8_t *)malloc((size_t)sz.QuadPart + 1);
     if (!p) { CloseHandle(h); return -1; }
     while (total < (size_t)sz.QuadPart) {
@@ -400,6 +402,22 @@ int path_is_remote(const wchar_t *s)
     }
 
     return 0;
+}
+
+int link_is_safe_external(const wchar_t *s)
+{
+    const wchar_t *p;
+    if (!s) return 0;
+    while (*s == L' ' || *s == L'\t' || *s == L'\r' || *s == L'\n') s++;
+    if (_wcsnicmp(s, L"http://", 7) == 0) p = s + 7;
+    else if (_wcsnicmp(s, L"https://", 8) == 0) p = s + 8;
+    else if (_wcsnicmp(s, L"mailto:", 7) == 0) p = s + 7;
+    else return 0;
+    if (!*p) return 0;
+    for (; *p; p++) {
+        if (*p < 0x20 || *p == 0x7F) return 0;
+    }
+    return 1;
 }
 
 /* ---------------- Compression ---------------- */

@@ -8,6 +8,7 @@
 #include <math.h>
 #include <wctype.h>
 #include "layout.h"
+#include "syntax.h"
 
 /* ---------------- Palette ---------------- */
 typedef struct Theme {
@@ -195,15 +196,15 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
     /* 1. Resolve glyphs for all runs */
     for (r = 0; r < nruns; r++) {
         const Run *run = &runs[r];
-        int fam = (run->style & ST_CODE) ? FAM_MONO : FAM_BODY;
+        int fam = (run->style & (ST_CODE | ST_BLOCKCODE)) ? FAM_MONO : FAM_BODY;
         int bld = (run->style & ST_BOLD) != 0;
         int itl = (run->style & ST_ITALIC) != 0;
         float sz = baseFontSize;
-        uint32_t col = th->text;
+        uint32_t col = run->color ? run->color : (fam == FAM_MONO ? th->codeText : th->text);
 
         if (run->style & ST_LINK) col = th->link;
         if (run->style & (ST_SUP | ST_SUB)) sz *= 0.75f;
-        if (run->style & ST_CODE) sz *= 0.9f;
+        if ((run->style & ST_CODE) && !(run->style & ST_BLOCKCODE)) sz *= 0.9f;
 
         if (run->type == RN_BREAK) {
             if (nGlyphs == glyphCap) {
@@ -228,11 +229,18 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
                 int startIdx = idx;
                 uint32_t cp = utf16_next(run->text, len, &idx);
                 int gid = 0;
-                Font *f = font_resolve(fam, bld, itl, cp, &gid);
-                float adv = (float)font_adv(f, gid) * sz / (float)f->upem;
-                if (fam == FAM_MONO) {
-                    /* Monospace font letter-spacing (자간) to prevent cramped glyphs */
-                    adv += sz * 0.05f;
+                Font *f;
+                float adv;
+                if (cp == '\t') {
+                    f = font_resolve(fam, bld, itl, ' ', &gid);
+                    adv = ((float)font_adv(f, gid) * sz / (float)f->upem + (fam == FAM_MONO ? sz * 0.05f : 0.0f)) * 4.0f;
+                } else {
+                    f = font_resolve(fam, bld, itl, cp, &gid);
+                    adv = (float)font_adv(f, gid) * sz / (float)f->upem;
+                    if (fam == FAM_MONO) {
+                        /* Monospace font letter-spacing (자간) to prevent cramped glyphs */
+                        adv += sz * 0.05f;
+                    }
                 }
 
                 if (nGlyphs == glyphCap) {
@@ -383,7 +391,7 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
                         bg->h = line->ascent + line->descent + 2.0f;
                         bg->color = th->markBg;
                     }
-                    if (g0->style & ST_CODE) {
+                    if ((g0->style & ST_CODE) && !(g0->style & ST_BLOCKCODE)) {
                         /* Inline code background */
                         Item *bg = add_item(ctx, IT_FILL, 0);
                         float codePadY = 2.0f;
@@ -463,6 +471,50 @@ static void layout_children(LayCtx *ctx, Block *b, float x, float w, float spaci
     for (i = 0; i < b->nkids; i++) {
         if (i > 0 && spacing > 0) ctx->curY += spacing;
         layout_block(ctx, b->kids[i], x, w);
+    }
+}
+
+typedef struct CodeRunList {
+    Run *runs;
+    Run stackRuns[64];
+    int count;
+    int cap;
+} CodeRunList;
+
+static void cr_init(CodeRunList *list)
+{
+    list->runs = list->stackRuns;
+    list->count = 0;
+    list->cap = 64;
+}
+
+static void cr_add(CodeRunList *list, const wchar_t *text, int len, SynTokType type, const SynColors *cols)
+{
+    Run *r;
+    if (len <= 0) return;
+    if (list->count == list->cap) {
+        int newCap = list->cap * 2;
+        Run *newBuf = (Run *)malloc(newCap * sizeof(Run));
+        if (!newBuf) return;
+        memcpy(newBuf, list->runs, list->count * sizeof(Run));
+        if (list->runs != list->stackRuns) free(list->runs);
+        list->runs = newBuf;
+        list->cap = newCap;
+    }
+    r = &list->runs[list->count++];
+    memset(r, 0, sizeof(Run));
+    r->type = RN_TEXT;
+    r->style = ST_BLOCKCODE;
+    if (type == SYN_COMMENT) r->style |= ST_ITALIC;
+    r->color = syntax_token_color(cols, type);
+    r->text = (wchar_t *)text;
+    r->len = len;
+}
+
+static void cr_free(CodeRunList *list)
+{
+    if (list->runs && list->runs != list->stackRuns) {
+        free(list->runs);
     }
 }
 
@@ -700,6 +752,10 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
         float totalH;
         Item *bg;
         Item *border;
+        int tokCount = 0;
+        SynToken *tokens = syntax_highlight(b->lang, b->text, b->textlen, &tokCount);
+        const SynColors *synColors = syntax_get_colors(ctx->th == &g_dark);
+        Layout *L = ctx->L;
 
         for (i = 0; i < b->textlen; i++) {
             if (b->text[i] == '\n') lineCount++;
@@ -730,22 +786,71 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
         /* Render code lines */
         {
             int lineStart = 0;
+            int tokIdx = 0;
             while (lineStart < b->textlen) {
                 int lineEnd = lineStart;
-                Run r = {0};
                 while (lineEnd < b->textlen && b->text[lineEnd] != '\n' && b->text[lineEnd] != '\r') lineEnd++;
-                r.type = RN_TEXT;
-                r.style = ST_CODE;
-                r.text = b->text + lineStart;
-                r.len = lineEnd - lineStart;
 
-                layout_inline_runs(ctx, &r, 1, x + pad, w - pad * 2, AL_DEFAULT, codeSize, 1.35f, NULL);
+                if (lineStart == lineEnd) {
+                    /* Blank line */
+                    check_page_space(ctx, lineH);
+                    ctx->curY += lineH;
+                    if (L->text && L->textlen > 0 && L->text[L->textlen - 1] != L'\n') {
+                        if (L->textlen + 2 > L->textcap) {
+                            L->textcap = L->textcap ? L->textcap * 2 : 512;
+                            L->text = (wchar_t *)realloc(L->text, L->textcap * sizeof(wchar_t));
+                        }
+                        L->text[L->textlen++] = L'\n';
+                    }
+                } else {
+                    CodeRunList crl;
+                    cr_init(&crl);
+
+                    while (tokIdx < tokCount && tokens[tokIdx].start + tokens[tokIdx].len <= lineStart) {
+                        tokIdx++;
+                    }
+
+                    {
+                        int t = tokIdx;
+                        int pos = lineStart;
+
+                        while (pos < lineEnd) {
+                            if (t < tokCount && tokens[t].start < lineEnd) {
+                                if (tokens[t].start > pos) {
+                                    cr_add(&crl, b->text + pos, tokens[t].start - pos, SYN_DEFAULT, synColors);
+                                    pos = tokens[t].start;
+                                }
+                                {
+                                    int tokStart = pos > tokens[t].start ? pos : tokens[t].start;
+                                    int tokEnd = lineEnd < tokens[t].start + tokens[t].len ? lineEnd : tokens[t].start + tokens[t].len;
+                                    if (tokEnd > tokStart) {
+                                        cr_add(&crl, b->text + tokStart, tokEnd - tokStart, tokens[t].type, synColors);
+                                        pos = tokEnd;
+                                    }
+                                }
+                                if (tokens[t].start + tokens[t].len <= lineEnd) {
+                                    t++;
+                                }
+                            } else {
+                                cr_add(&crl, b->text + pos, lineEnd - pos, SYN_DEFAULT, synColors);
+                                pos = lineEnd;
+                            }
+                        }
+                    }
+
+                    if (crl.count > 0) {
+                        layout_inline_runs(ctx, crl.runs, crl.count, x + pad, w - pad * 2, AL_DEFAULT, codeSize, 1.35f, NULL);
+                    }
+                    cr_free(&crl);
+                }
 
                 if (lineEnd < b->textlen && b->text[lineEnd] == '\r') lineEnd++;
                 if (lineEnd < b->textlen && b->text[lineEnd] == '\n') lineEnd++;
                 lineStart = lineEnd;
             }
         }
+
+        if (tokens) free(tokens);
 
         ctx->curY += pad;
         bg->h = ctx->curY - startY;

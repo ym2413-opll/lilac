@@ -53,6 +53,7 @@ typedef enum RunType {
 #define ST_SUB       0x0080
 #define ST_MARK      0x0100  /* ==highlight== */
 #define ST_KBD       0x0200  /* <kbd> */
+#define ST_BLOCKCODE 0x0400  /* code block syntax token */
 
 typedef enum AlertKind {
     AL_NOTE = 0, AL_TIP, AL_IMPORTANT, AL_WARNING, AL_CAUTION
@@ -65,6 +66,7 @@ typedef enum Align {
 typedef struct Run {
     int      type;      /* RunType */
     unsigned style;     /* ST_* bits */
+    uint32_t color;     /* 0 = default theme color, or 0xRRGGBB */
     int      link;      /* index into Doc.links, or -1 */
     wchar_t *text;      /* RN_TEXT: text; RN_IMAGE: alt text; RN_FOOTREF: label */
     int      len;

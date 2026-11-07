@@ -11,6 +11,7 @@
 #include "util.h"
 #include "image.h"
 #include "font.h"
+#include "syntax.h"
 
 /* Helper to sanitize a bookmark name for Word */
 static void sanitize_bookmark(const wchar_t *slug, wchar_t *out, int maxlen)
@@ -168,23 +169,27 @@ static void emit_runs(DocxCtx *ctx, Buf *b, const Run *runs, int nruns)
             int linkIdx = r->link;
             const wchar_t *target = (linkIdx < ctx->doc->nlinks) ? ctx->doc->links[linkIdx] : L"";
             int isAnchor = (target[0] == '#');
+            int isSafe = isAnchor || link_is_safe_external(target);
             int relId = 0;
 
-            if (isAnchor) {
-                wchar_t bm[64];
-                sanitize_bookmark(target + 1, bm, 64);
-                buf_printf(b, "<w:hyperlink w:anchor=\"%ls\">", bm);
-            } else {
-                char *utf8 = utf16_to_utf8(target, -1, NULL);
-                relId = add_docx_rel(ctx, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
-                                     utf8 ? utf8 : "", 1);
-                free(utf8);
-                buf_printf(b, "<w:hyperlink r:id=\"rId%d\">", relId);
+            if (isSafe) {
+                if (isAnchor) {
+                    wchar_t bm[64];
+                    sanitize_bookmark(target + 1, bm, 64);
+                    buf_printf(b, "<w:hyperlink w:anchor=\"%ls\">", bm);
+                } else {
+                    char *utf8 = utf16_to_utf8(target, -1, NULL);
+                    relId = add_docx_rel(ctx, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
+                                         utf8 ? utf8 : "", 1);
+                    free(utf8);
+                    buf_printf(b, "<w:hyperlink r:id=\"rId%d\">", relId);
+                }
             }
 
             while (i < nruns && runs[i].link == linkIdx && runs[i].type == RN_TEXT) {
                 const Run *kr = &runs[i];
-                buf_puts(b, "<w:r><w:rPr><w:rStyle w:val=\"Hyperlink\"/>");
+                buf_puts(b, "<w:r><w:rPr>");
+                if (isSafe) buf_puts(b, "<w:rStyle w:val=\"Hyperlink\"/>");
                 if (kr->style & ST_BOLD) buf_puts(b, "<w:b/>");
                 if (kr->style & ST_ITALIC) buf_puts(b, "<w:i/>");
                 if (kr->style & ST_STRIKE) buf_puts(b, "<w:strike/>");
@@ -194,7 +199,7 @@ static void emit_runs(DocxCtx *ctx, Buf *b, const Run *runs, int nruns)
                 buf_puts(b, "</w:t></w:r>");
                 i++;
             }
-            buf_puts(b, "</w:hyperlink>");
+            if (isSafe) buf_puts(b, "</w:hyperlink>");
             continue;
         }
 
@@ -213,6 +218,28 @@ static void emit_runs(DocxCtx *ctx, Buf *b, const Run *runs, int nruns)
         buf_puts(b, "</w:t></w:r>");
         i++;
     }
+}
+
+static void docx_put_code_run(Buf *b, const wchar_t *text, int len, uint32_t col, int isItalic)
+{
+    int p;
+    if (len <= 0) return;
+    buf_puts(b, "<w:r><w:rPr>");
+    if (col != 0) {
+        char colBuf[32];
+        sprintf(colBuf, "<w:color w:val=\"%06X\"/>", col & 0xFFFFFF);
+        buf_puts(b, colBuf);
+    }
+    if (isItalic) buf_puts(b, "<w:i/>");
+    buf_puts(b, "</w:rPr><w:t xml:space=\"preserve\">");
+    for (p = 0; p < len; p++) {
+        if (text[p] == '\t') {
+            buf_puts(b, "    ");
+        } else {
+            buf_put_xml_w(b, text + p, 1);
+        }
+    }
+    buf_puts(b, "</w:t></w:r>");
 }
 
 /* Recursive block emitter */
@@ -352,27 +379,57 @@ static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int list
 
     case BK_CODE: {
         int lineStart = 0;
+        int tokCount = 0;
+        SynToken *tokens = syntax_highlight(blk->lang, blk->text, blk->textlen, &tokCount);
+        const SynColors *synColors = syntax_get_colors(0);
+        int curTok = 0;
+
         buf_puts(b, "<w:p><w:pPr><w:pStyle w:val=\"SourceCode\"/></w:pPr>");
         while (lineStart < blk->textlen) {
             int lineEnd = lineStart;
-            int p;
             while (lineEnd < blk->textlen && blk->text[lineEnd] != '\n' && blk->text[lineEnd] != '\r') lineEnd++;
-            buf_puts(b, "<w:r><w:t xml:space=\"preserve\">");
-            for (p = lineStart; p < lineEnd; p++) {
-                if (blk->text[p] == '\t') {
-                    buf_puts(b, "    ");
-                } else {
-                    buf_put_xml_w(b, blk->text + p, 1);
+
+            while (curTok < tokCount && tokens[curTok].start + tokens[curTok].len <= lineStart) {
+                curTok++;
+            }
+
+            {
+                int t = curTok;
+                int pos = lineStart;
+
+                while (pos < lineEnd) {
+                    if (t < tokCount && tokens[t].start < lineEnd) {
+                        if (tokens[t].start > pos) {
+                            docx_put_code_run(b, blk->text + pos, tokens[t].start - pos, synColors->text, 0);
+                            pos = tokens[t].start;
+                        }
+                        {
+                            int tokStart = pos > tokens[t].start ? pos : tokens[t].start;
+                            int tokEnd = lineEnd < tokens[t].start + tokens[t].len ? lineEnd : tokens[t].start + tokens[t].len;
+                            if (tokEnd > tokStart) {
+                                uint32_t col = syntax_token_color(synColors, tokens[t].type);
+                                int isItalic = (tokens[t].type == SYN_COMMENT);
+                                docx_put_code_run(b, blk->text + tokStart, tokEnd - tokStart, col, isItalic);
+                                pos = tokEnd;
+                            }
+                        }
+                        if (tokens[t].start + tokens[t].len <= lineEnd) {
+                            t++;
+                        }
+                    } else {
+                        docx_put_code_run(b, blk->text + pos, lineEnd - pos, synColors->text, 0);
+                        pos = lineEnd;
+                    }
                 }
             }
-            buf_puts(b, "</w:t>");
-            if (lineEnd < blk->textlen) buf_puts(b, "<w:br/>");
-            buf_puts(b, "</w:r>");
+
+            if (lineEnd < blk->textlen) buf_puts(b, "<w:r><w:br/></w:r>");
             if (lineEnd < blk->textlen && blk->text[lineEnd] == '\r') lineEnd++;
             if (lineEnd < blk->textlen && blk->text[lineEnd] == '\n') lineEnd++;
             lineStart = lineEnd;
         }
         buf_puts(b, "</w:p>");
+        if (tokens) free(tokens);
         break;
     }
 

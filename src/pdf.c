@@ -53,6 +53,45 @@ static void pdf_end_obj(PdfWriter *pw)
     buf_puts(&pw->buf, "endobj\n\n");
 }
 
+/* Write a URI as a PDF literal string "(...)".
+ * '(' ')' '\' are backslash-escaped so attacker-controlled link targets cannot
+ * terminate the string and inject PDF syntax (e.g. /Launch or /JavaScript actions).
+ * Non-printable and non-ASCII bytes are percent-encoded (PDF URIs are 7-bit ASCII). */
+static void pdf_put_uri_string(Buf *b, const wchar_t *uri)
+{
+    static const char hex[] = "0123456789ABCDEF";
+    char *utf8 = utf16_to_utf8(uri ? uri : L"", -1, NULL);
+    const unsigned char *p = (const unsigned char *)(utf8 ? utf8 : "");
+    buf_putc(b, '(');
+    for (; *p; p++) {
+        unsigned char c = *p;
+        if (c == '(' || c == ')' || c == '\\') {
+            buf_putc(b, '\\');
+            buf_putc(b, (char)c);
+        } else if (c <= 0x20 || c >= 0x7F) {
+            buf_putc(b, '%');
+            buf_putc(b, hex[c >> 4]);
+            buf_putc(b, hex[c & 15]);
+        } else {
+            buf_putc(b, (char)c);
+        }
+    }
+    buf_putc(b, ')');
+    free(utf8);
+}
+
+/* Write a text string as a UTF-16BE hex string "<FEFF....>".
+ * Hex strings cannot be broken out of, and BOM-prefixed UTF-16 renders
+ * non-Latin titles (e.g. Korean) correctly in PDF viewers. */
+static void pdf_put_text_string(Buf *b, const wchar_t *s)
+{
+    buf_puts(b, "<FEFF");
+    if (s) {
+        for (; *s; s++) buf_printf(b, "%04X", (unsigned)(*s & 0xFFFF));
+    }
+    buf_putc(b, '>');
+}
+
 static void pdf_put_stream(PdfWriter *pw, const void *data, size_t len, int compress)
 {
     if (compress && len > 64) {
@@ -106,8 +145,9 @@ static void scan_composite_glyphs(UsedGlyphs *ug, const uint8_t *glyf, uint32_t 
         for (g = 0; g < numGlyphs; g++) {
             if (is_glyph_marked(ug, g)) {
                 uint32_t off = loca[g];
-                uint32_t len = loca[g + 1] - off;
-                if (len >= 10 && off + len <= glyfLen) {
+                uint32_t nextOff = loca[g + 1];
+                if (nextOff >= off && nextOff <= glyfLen && nextOff - off >= 10) {
+                    uint32_t len = nextOff - off;
                     int16_t numContours = (int16_t)((glyf[off] << 8) | glyf[off + 1]);
                     if (numContours < 0) { /* Composite glyph */
                         uint32_t p = off + 10;
@@ -171,12 +211,17 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
     loca = font_table(f, MV_TAG('l','o','c','a'), &locaLen);
     glyf = font_table(f, MV_TAG('g','l','y','f'), &glyfLen);
 
-    if (!head || !hhea || !maxp || !hmtx || !loca || !glyf) {
+    if (!head || headLen < 54 || !hhea || !maxp || !hmtx || !loca || !glyf || f->numGlyphs <= 0) {
         free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
         return NULL;
     }
 
     isLocaLong = (head[51] != 0);
+    if (locaLen < (uint32_t)(f->numGlyphs + 1) * (isLocaLong ? 4u : 2u)) {
+        free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+        return NULL;
+    }
+
     oldLoca = (uint32_t *)malloc((f->numGlyphs + 1) * sizeof(uint32_t));
     newLoca = (uint32_t *)malloc((f->numGlyphs + 1) * sizeof(uint32_t));
     newGlyf = (uint8_t *)malloc(newGlyfCap);
@@ -197,8 +242,9 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
         newLoca[g] = (uint32_t)newGlyfSize;
         if (is_glyph_marked(ug, g)) {
             uint32_t gOff = oldLoca[g];
-            uint32_t gLen = oldLoca[g + 1] - gOff;
-            if (gLen > 0 && gOff + gLen <= glyfLen) {
+            uint32_t gNext = oldLoca[g + 1];
+            if (gNext > gOff && gNext <= glyfLen) {
+                uint32_t gLen = gNext - gOff;
                 while (newGlyfSize + gLen + 4 > newGlyfCap) {
                     newGlyfCap *= 2;
                     newGlyf = (uint8_t *)realloc(newGlyf, newGlyfCap);
@@ -744,15 +790,14 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
                         buf_printf(&annots, "%d 0 R ", annotObj);
                         numAnnots++;
                     }
-                } else {
+                } else if (link_is_safe_external(target)) {
+                    /* Only http(s)/mailto become clickable; file:, UNC, javascript: etc. are dropped */
                     int annotObj = pdf_new_obj(&pw);
-                    char *utf8 = utf16_to_utf8(target, -1, NULL);
                     buf_printf(&pw.buf, "<< /Type /Annot /Subtype /Link /Rect [%.3f %.3f %.3f %.3f] /Border [0 0 0]\n"
-                                        "/A << /S /URI /URI (", x1, y1, x2, y2);
-                    buf_put_xml(&pw.buf, utf8 ? utf8 : "", -1);
-                    buf_puts(&pw.buf, ") >> >>\n");
+                                        "/A << /S /URI /URI ", x1, y1, x2, y2);
+                    pdf_put_uri_string(&pw.buf, target);
+                    buf_puts(&pw.buf, " >> >>\n");
                     pdf_end_obj(&pw);
-                    free(utf8);
                     buf_printf(&annots, "%d 0 R ", annotObj);
                     numAnnots++;
                 }
@@ -814,15 +859,9 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
 
     /* 6. Document Info */
     infoObj = pdf_new_obj(&pw);
-    buf_puts(&pw.buf, "<< /Producer (Lilac) /Title (");
-    if (L->doc && L->doc->title) {
-        char *utf8 = utf16_to_utf8(L->doc->title, -1, NULL);
-        buf_puts(&pw.buf, utf8 ? utf8 : "Document");
-        free(utf8);
-    } else {
-        buf_puts(&pw.buf, "Document");
-    }
-    buf_puts(&pw.buf, ") >>\n");
+    buf_puts(&pw.buf, "<< /Producer (Lilac) /Title ");
+    pdf_put_text_string(&pw.buf, (L->doc && L->doc->title) ? L->doc->title : L"Document");
+    buf_puts(&pw.buf, " >>\n");
     pdf_end_obj(&pw);
 
     /* 7. Cross-reference Table & Trailer */

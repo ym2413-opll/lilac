@@ -150,24 +150,27 @@ static void settings_load(void)
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Lilac\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS ||
         RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\MarkView\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        wchar_t buf[512];
-        DWORD sz = sizeof(buf);
+        wchar_t buf[512] = {0};
+        DWORD sz = sizeof(buf) - sizeof(wchar_t);
         DWORD val = 0, valSz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"BodyFontChain", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && buf[0]) {
+        if (RegQueryValueExW(hKey, L"BodyFontChain", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && (buf[511] = 0, buf[0])) {
             font_set_family_chain(FAM_BODY, buf);
         } else {
-            sz = sizeof(buf);
-            if (RegQueryValueExW(hKey, L"BodyFont", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && buf[0]) {
+            memset(buf, 0, sizeof(buf));
+            sz = sizeof(buf) - sizeof(wchar_t);
+            if (RegQueryValueExW(hKey, L"BodyFont", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && (buf[511] = 0, buf[0])) {
                 font_set_family_face(FAM_BODY, buf);
             }
         }
 
-        sz = sizeof(buf);
-        if (RegQueryValueExW(hKey, L"MonoFontChain", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && buf[0]) {
+        memset(buf, 0, sizeof(buf));
+        sz = sizeof(buf) - sizeof(wchar_t);
+        if (RegQueryValueExW(hKey, L"MonoFontChain", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && (buf[511] = 0, buf[0])) {
             font_set_family_chain(FAM_MONO, buf);
         } else {
-            sz = sizeof(buf);
-            if (RegQueryValueExW(hKey, L"MonoFont", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && buf[0]) {
+            memset(buf, 0, sizeof(buf));
+            sz = sizeof(buf) - sizeof(wchar_t);
+            if (RegQueryValueExW(hKey, L"MonoFont", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && (buf[511] = 0, buf[0])) {
                 font_set_family_face(FAM_MONO, buf);
             }
         }
@@ -176,13 +179,16 @@ static void settings_load(void)
         if (RegQueryValueExW(hKey, L"RecentCount", NULL, NULL, (LPBYTE)&val, &valSz) == ERROR_SUCCESS) {
             int count = (int)val;
             int i;
+            if (count < 0) count = 0;
             if (count > MAX_RECENT) count = MAX_RECENT;
             g_recentCount = 0;
             for (i = 0; i < count; i++) {
                 wchar_t keyName[32];
                 swprintf_s(keyName, 32, L"RecentFile%d", i);
-                sz = sizeof(g_recentFiles[g_recentCount]);
+                memset(g_recentFiles[g_recentCount], 0, sizeof(g_recentFiles[g_recentCount]));
+                sz = sizeof(g_recentFiles[g_recentCount]) - sizeof(wchar_t);
                 if (RegQueryValueExW(hKey, keyName, NULL, NULL, (LPBYTE)g_recentFiles[g_recentCount], &sz) == ERROR_SUCCESS) {
+                    g_recentFiles[g_recentCount][MAX_PATH - 1] = 0;
                     if (g_recentFiles[g_recentCount][0]) g_recentCount++;
                 }
             }
@@ -1385,11 +1391,13 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                     if (target[0] == '#') {
                         const Anchor *anc = layout_find_anchor(g_app.layout, target + 1);
                         if (anc) do_scroll((int)anc->y - 20);
-                    } else if (!_wcsnicmp(target, L"http://", 7) || !_wcsnicmp(target, L"https://", 8) || !_wcsnicmp(target, L"mailto:", 7)) {
+                    } else if (link_is_safe_external(target)) {
                         ShellExecuteW(hWnd, L"open", target, NULL, NULL, SW_SHOWNORMAL);
-                    } else if (g_app.doc->dir) {
+                    } else if (g_app.doc->dir && !path_is_remote(target) &&
+                               !wcschr(target, L':') && target[0] != L'\\' && target[0] != L'/') {
                         wchar_t *joined = path_join(g_app.doc->dir, target);
-                        if (GetFileAttributesW(joined) != INVALID_FILE_ATTRIBUTES) {
+                        if (joined && !path_is_remote(joined) &&
+                            GetFileAttributesW(joined) != INVALID_FILE_ATTRIBUTES) {
                             open_file(joined);
                         }
                         free(joined);
@@ -1702,7 +1710,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_HELP_ABOUT:
             MessageBoxW(hWnd,
                         L"Lilac the Markdown Viewer\n\n"
-                        L"by ym2413-opll, Version 1.1.1\n",
+                        L"by ym2413-opll, Version 1.2.0.\n",
                         L"정보", MB_OK | MB_ICONINFORMATION);
             return 0;
         }

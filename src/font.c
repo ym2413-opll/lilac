@@ -114,7 +114,7 @@ static void parse_name(Font *f, const uint8_t *data, uint32_t len)
             const uint8_t *s = data + stringOffset + offset;
             int k, o = 0;
             if (platformId == 3 || platformId == 0) { /* UTF-16BE */
-                for (k = 0; k < nlen && o < 63; k += 2) {
+                for (k = 0; k + 1 < nlen && o < 63; k += 2) {
                     char c = (char)s[k + 1];
                     if (c > 32 && c < 127) f->psName[o++] = c;
                 }
@@ -144,9 +144,18 @@ static void setup_cmap(Font *f, const uint8_t *data, uint32_t len)
         uint32_t offset = read_u32(data + 4 + i * 8 + 4);
         if (offset + 4 <= len) {
             uint16_t format = read_u16(data + offset);
-            if (format == 12 && (platformId == 3 && (encodingId == 10 || encodingId == 1))) sub12 = offset;
-            else if (format == 4 && (platformId == 3 || platformId == 0)) {
-                if (!sub4) sub4 = offset;
+            if (format == 12 && (platformId == 3 && (encodingId == 10 || encodingId == 1))) {
+                if (offset + 16 <= len) {
+                    uint32_t nGroups = read_u32(data + offset + 12);
+                    if (nGroups <= (len - offset - 16) / 12) sub12 = offset;
+                }
+            } else if (format == 4 && (platformId == 3 || platformId == 0)) {
+                if (!sub4 && offset + 14 <= len) {
+                    uint16_t segCountX2 = read_u16(data + offset + 6);
+                    if ((segCountX2 & 1) == 0 && (uint32_t)segCountX2 * 4 + 16 <= len - offset) {
+                        sub4 = offset;
+                    }
+                }
             }
         }
     }
@@ -193,6 +202,7 @@ Font *font_get(const wchar_t *face, int bold, int italic)
 
     f->isTrueType = 1;
     f->upem = read_u16(head + 18);
+    if (f->upem == 0) f->upem = 1000;
     f->xMin = read_i16(head + 36);
     f->yMin = read_i16(head + 38);
     f->xMax = read_i16(head + 40);
@@ -305,12 +315,16 @@ int font_glyph(Font *f, uint32_t cp)
                     uint16_t rangeOff = read_u16(idRangeOffset + i * 2);
                     int16_t delta = read_i16(idDelta + i * 2);
                     if (rangeOff == 0) {
-                        return (uint16_t)((cp + delta) & 0xFFFF);
+                        int gid = (uint16_t)((cp + delta) & 0xFFFF);
+                        return (gid < f->numGlyphs) ? gid : 0;
                     } else {
                         const uint8_t *ptr = idRangeOffset + i * 2 + rangeOff + (cp - start) * 2;
-                        if ((uint32_t)(ptr - f->cmapData + 2) <= f->cmapLen) {
+                        if (ptr >= f->cmapData && (size_t)(ptr - f->cmapData) + 2 <= f->cmapLen) {
                             uint16_t gid = read_u16(ptr);
-                            if (gid != 0) return (uint16_t)((gid + delta) & 0xFFFF);
+                            if (gid != 0) {
+                                int mapped = (uint16_t)((gid + delta) & 0xFFFF);
+                                return (mapped < f->numGlyphs) ? mapped : 0;
+                            }
                         }
                     }
                 }
@@ -321,17 +335,20 @@ int font_glyph(Font *f, uint32_t cp)
         const uint8_t *sub = f->cmapData + f->cmapSub;
         uint32_t nGroups = read_u32(sub + 12);
         const uint8_t *groups = sub + 16;
-        int l = 0, r = (int)nGroups - 1;
+        int l = 0, r;
+        if (nGroups > (f->cmapLen - f->cmapSub - 16) / 12) return 0;
+        r = (int)nGroups - 1;
         while (l <= r) {
-            int m = (l + r) / 2;
-            const uint8_t *grp = groups + m * 12;
+            int m = l + (r - l) / 2;
+            const uint8_t *grp = groups + (size_t)m * 12;
             uint32_t start = read_u32(grp);
             uint32_t end = read_u32(grp + 4);
             if (cp < start) r = m - 1;
             else if (cp > end) l = m + 1;
             else {
                 uint32_t startGid = read_u32(grp + 8);
-                return (int)(startGid + (cp - start));
+                uint32_t gid = startGid + (cp - start);
+                return (gid < (uint32_t)f->numGlyphs) ? (int)gid : 0;
             }
         }
     }

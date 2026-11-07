@@ -73,6 +73,8 @@ wchar_t *path_join(const wchar_t *dir, const wchar_t *rel);
 wchar_t *path_with_ext(const wchar_t *path, const wchar_t *ext);
 /* Returns 1 if path is a remote URL (http/https), UNC path (\\ or //), device path, or file:// with host. */
 int      path_is_remote(const wchar_t *path);
+/* Returns 1 if link target is a safe external URI scheme (http://, https://, mailto:) with no control chars. */
+int      link_is_safe_external(const wchar_t *s);
 
 /* ---------- Compression ---------- */
 /* zlib-wrapped deflate (RFC 1950) - for PDF FlateDecode. Returns length, *out malloc()ed. */

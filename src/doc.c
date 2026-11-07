@@ -454,7 +454,7 @@ static void convert_html_block(PState *ps, const wchar_t *s, int len)
                     !wcscmp(t.name, L"blockquote") || !wcscmp(t.name, L"table") || !wcscmp(t.name, L"tr") ||
                     !wcscmp(t.name, L"ul") || !wcscmp(t.name, L"ol") || !wcscmp(t.name, L"pre") ||
                     !wcscmp(t.name, L"figcaption") || !wcscmp(t.name, L"dl") || !wcscmp(t.name, L"dd") ||
-                    !wcscmp(t.name, L"dt") || !wcscmp(t.name, L"picture") == 2) {
+                    !wcscmp(t.name, L"dt") || !wcscmp(t.name, L"picture")) {
                     END_PARA();
                     if (!t.selfclose) {
                         if (!t.closing) {

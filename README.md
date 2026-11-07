@@ -114,7 +114,7 @@
   - GitHub 알림 블록 (`> [!NOTE]`, `> [!TIP]`, `> [!IMPORTANT]`, `> [!WARNING]`, `> [!CAUTION]`)
   - 인용구 (`>`)
   - 표 (`|`, 좌측/중앙/우측 정렬)
-  - 코드 블록 (백틱 3개, 자간 오프셋 보정 및 탭 들여쓰기 유지)
+  - 코드 블록 (백틱 3개, 구문 강조/Syntax Highlighting 지원, 자간 오프셋 보정 및 탭 들여쓰기 유지)
   - 수평선 (`---`, `***`)
   - 이미지 (인라인/블록, PNG/JPEG/GIF/BMP 및 data URL 지원)
   - 각주 (`[^1]`)
@@ -146,6 +146,7 @@
   - `main.c`: Win32 GUI 진입점, 메시지 루프, 파일 연결, 설정 입출력.
   - `doc.c` / `doc.h`: md4c 파서 래핑 및 AST 문서 모델 정의.
   - `layout.c` / `layout.h`: 텍스트 배치, 화면 뷰어 및 페이지 분할 레이아웃 계산.
+  - `syntax.c` / `syntax.h`: 코드 블록 구문 강조(Syntax Highlighter) 및 언어별 어휘 분석기.
   - `font.c` / `font.h`: 폰트 Fallback 체인 관리, TrueType CMap 파싱 및 글리프 탐색.
   - `pdf.c`: TrueType 서브셋 임베딩 기반 PDF 1.7 생성 엔진.
   - `docx.c`: OpenXML 기반 Word 문서 생성 엔진.
