@@ -1,10 +1,12 @@
 /*
- * syntax.c - Markdown code block syntax highlighter implementation.
+ * syntax.c - Markdown code block syntax highlighter implementation (UTF-8).
  * Pure C, zero external dependencies.
  */
 #include "syntax.h"
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <stdint.h>
 
 typedef enum SynLang {
     LANG_PLAIN = -1,
@@ -91,15 +93,24 @@ static void tb_init(TokBuf *tb)
 {
     tb->cap = 64;
     tb->count = 0;
-    tb->tokens = (SynToken *)malloc(tb->cap * sizeof(SynToken));
+    tb->tokens = (SynToken *)malloc((size_t)tb->cap * sizeof(SynToken));
+    if (!tb->tokens) tb->cap = 0;
 }
 
 static void tb_add(TokBuf *tb, int start, int len, SynTokType type)
 {
     if (len <= 0) return;
-    if (tb->count == tb->cap) {
-        tb->cap *= 2;
-        tb->tokens = (SynToken *)realloc(tb->tokens, tb->cap * sizeof(SynToken));
+    if (tb->count >= tb->cap) {
+        int newCap;
+        SynToken *nt;
+        if (tb->cap <= 0) newCap = 64;
+        else if (tb->cap > INT_MAX / 2) return;
+        else newCap = tb->cap * 2;
+        if ((size_t)newCap > SIZE_MAX / sizeof(SynToken)) return;
+        nt = (SynToken *)realloc(tb->tokens, (size_t)newCap * sizeof(SynToken));
+        if (!nt) return;
+        tb->tokens = nt;
+        tb->cap = newCap;
     }
     tb->tokens[tb->count].start = start;
     tb->tokens[tb->count].len = len;
@@ -107,51 +118,51 @@ static void tb_add(TokBuf *tb, int start, int len, SynTokType type)
     tb->count++;
 }
 
-static int is_alpha(wchar_t c)
+static int is_alpha(char c)
 {
-    return (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || c == L'_' || c == L'$';
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_' || c == '$';
 }
 
-static int is_alnum(wchar_t c)
+static int is_alnum(char c)
 {
-    return is_alpha(c) || (c >= L'0' && c <= L'9');
+    return is_alpha(c) || (c >= '0' && c <= '9');
 }
 
-static int is_digit(wchar_t c)
+static int is_digit(char c)
 {
-    return c >= L'0' && c <= L'9';
+    return c >= '0' && c <= '9';
 }
 
-static int is_hex(wchar_t c)
+static int is_hex(char c)
 {
-    return is_digit(c) || (c >= L'a' && c <= L'f') || (c >= L'A' && c <= L'F');
+    return is_digit(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F');
 }
 
-static int match_kw(const wchar_t *text, int len, const char *kw)
+static int match_kw(const char *text, int len, const char *kw)
 {
     int i;
-    if ((wchar_t)kw[0] != text[0]) return 0;
+    if (kw[0] != text[0]) return 0;
     for (i = 1; i < len; i++) {
-        if (!kw[i] || (wchar_t)kw[i] != text[i]) return 0;
+        if (!kw[i] || kw[i] != text[i]) return 0;
     }
     return kw[len] == '\0';
 }
 
-static int match_kw_ci(const wchar_t *text, int len, const char *kw)
+static int match_kw_ci(const char *text, int len, const char *kw)
 {
     int i;
     for (i = 0; i < len; i++) {
-        wchar_t c = text[i];
+        char c = text[i];
         char k = kw[i];
         if (!k) return 0;
-        if (c >= L'a' && c <= L'z') c -= 32;
+        if (c >= 'a' && c <= 'z') c -= 32;
         if (k >= 'a' && k <= 'z') k -= 32;
-        if ((wchar_t)k != c) return 0;
+        if (k != c) return 0;
     }
     return kw[len] == '\0';
 }
 
-static int is_in_list(const wchar_t *text, int len, const char *const *list)
+static int is_in_list(const char *text, int len, const char *const *list)
 {
     int i;
     for (i = 0; list[i] != NULL; i++) {
@@ -160,7 +171,7 @@ static int is_in_list(const wchar_t *text, int len, const char *const *list)
     return 0;
 }
 
-static int is_in_list_ci(const wchar_t *text, int len, const char *const *list)
+static int is_in_list_ci(const char *text, int len, const char *const *list)
 {
     int i;
     for (i = 0; list[i] != NULL; i++) {
@@ -410,61 +421,61 @@ static const char *const g_gen_builtins[] = {
     "true", "false", "null", "nil", "undefined", "None", "this", "self", NULL
 };
 
-static SynLang detect_lang(const wchar_t *lang)
+static SynLang detect_lang(const char *lang)
 {
-    wchar_t buf[32];
+    char buf[32];
     int len = 0;
     if (!lang) return LANG_GENERIC;
-    while (*lang == L' ' || *lang == L'\t') lang++;
+    while (*lang == ' ' || *lang == '\t') lang++;
     if (!*lang) return LANG_GENERIC;
 
-    while (*lang && *lang != L' ' && *lang != L'\t' && *lang != L'{' && *lang != L':' && len < 31) {
-        wchar_t c = *lang++;
-        if (c >= L'A' && c <= L'Z') c += 32;
+    while (*lang && *lang != ' ' && *lang != '\t' && *lang != '{' && *lang != ':' && len < 31) {
+        char c = *lang++;
+        if (c >= 'A' && c <= 'Z') c += 32;
         buf[len++] = c;
     }
-    buf[len] = L'\0';
+    buf[len] = '\0';
     if (len == 0) return LANG_GENERIC;
 
-    if (wcscmp(buf, L"text") == 0 || wcscmp(buf, L"txt") == 0 ||
-        wcscmp(buf, L"plain") == 0 || wcscmp(buf, L"plaintext") == 0 ||
-        wcscmp(buf, L"none") == 0) {
+    if (strcmp(buf, "text") == 0 || strcmp(buf, "txt") == 0 ||
+        strcmp(buf, "plain") == 0 || strcmp(buf, "plaintext") == 0 ||
+        strcmp(buf, "none") == 0) {
         return LANG_PLAIN;
     }
 
-    if (wcscmp(buf, L"c") == 0 || wcscmp(buf, L"h") == 0) return LANG_C;
-    if (wcscmp(buf, L"cpp") == 0 || wcscmp(buf, L"c++") == 0 || wcscmp(buf, L"cc") == 0 ||
-        wcscmp(buf, L"cxx") == 0 || wcscmp(buf, L"hpp") == 0 || wcscmp(buf, L"hxx") == 0) return LANG_CPP;
-    if (wcscmp(buf, L"cs") == 0 || wcscmp(buf, L"csharp") == 0 || wcscmp(buf, L"c#") == 0) return LANG_CSHARP;
-    if (wcscmp(buf, L"java") == 0) return LANG_JAVA;
-    if (wcscmp(buf, L"rust") == 0 || wcscmp(buf, L"rs") == 0) return LANG_RUST;
-    if (wcscmp(buf, L"go") == 0 || wcscmp(buf, L"golang") == 0) return LANG_GO;
-    if (wcscmp(buf, L"js") == 0 || wcscmp(buf, L"javascript") == 0 ||
-        wcscmp(buf, L"ts") == 0 || wcscmp(buf, L"typescript") == 0 ||
-        wcscmp(buf, L"jsx") == 0 || wcscmp(buf, L"tsx") == 0 ||
-        wcscmp(buf, L"mjs") == 0 || wcscmp(buf, L"cjs") == 0) return LANG_JS;
-    if (wcscmp(buf, L"python") == 0 || wcscmp(buf, L"py") == 0 || wcscmp(buf, L"python3") == 0) return LANG_PYTHON;
-    if (wcscmp(buf, L"json") == 0 || wcscmp(buf, L"jsonc") == 0 || wcscmp(buf, L"json5") == 0) return LANG_JSON;
-    if (wcscmp(buf, L"html") == 0 || wcscmp(buf, L"htm") == 0 ||
-        wcscmp(buf, L"xml") == 0 || wcscmp(buf, L"svg") == 0 || wcscmp(buf, L"xhtml") == 0) return LANG_HTML;
-    if (wcscmp(buf, L"css") == 0 || wcscmp(buf, L"scss") == 0 || wcscmp(buf, L"sass") == 0 || wcscmp(buf, L"less") == 0) return LANG_CSS;
-    if (wcscmp(buf, L"sql") == 0 || wcscmp(buf, L"mysql") == 0 || wcscmp(buf, L"pgsql") == 0 ||
-        wcscmp(buf, L"postgres") == 0 || wcscmp(buf, L"sqlite") == 0) return LANG_SQL;
-    if (wcscmp(buf, L"sh") == 0 || wcscmp(buf, L"bash") == 0 || wcscmp(buf, L"zsh") == 0 || wcscmp(buf, L"shell") == 0) return LANG_SHELL;
-    if (wcscmp(buf, L"ps1") == 0 || wcscmp(buf, L"powershell") == 0 || wcscmp(buf, L"ps") == 0) return LANG_POWERSHELL;
-    if (wcscmp(buf, L"bat") == 0 || wcscmp(buf, L"batch") == 0 || wcscmp(buf, L"cmd") == 0) return LANG_BATCH;
-    if (wcscmp(buf, L"yaml") == 0 || wcscmp(buf, L"yml") == 0) return LANG_YAML;
-    if (wcscmp(buf, L"diff") == 0 || wcscmp(buf, L"patch") == 0) return LANG_DIFF;
-    if (wcscmp(buf, L"md") == 0 || wcscmp(buf, L"markdown") == 0) return LANG_MARKDOWN;
-    if (wcscmp(buf, L"kotlin") == 0 || wcscmp(buf, L"kt") == 0 || wcscmp(buf, L"kts") == 0) return LANG_KOTLIN;
-    if (wcscmp(buf, L"lua") == 0) return LANG_LUA;
+    if (strcmp(buf, "c") == 0 || strcmp(buf, "h") == 0) return LANG_C;
+    if (strcmp(buf, "cpp") == 0 || strcmp(buf, "c++") == 0 || strcmp(buf, "cc") == 0 ||
+        strcmp(buf, "cxx") == 0 || strcmp(buf, "hpp") == 0 || strcmp(buf, "hxx") == 0) return LANG_CPP;
+    if (strcmp(buf, "cs") == 0 || strcmp(buf, "csharp") == 0 || strcmp(buf, "c#") == 0) return LANG_CSHARP;
+    if (strcmp(buf, "java") == 0) return LANG_JAVA;
+    if (strcmp(buf, "rust") == 0 || strcmp(buf, "rs") == 0) return LANG_RUST;
+    if (strcmp(buf, "go") == 0 || strcmp(buf, "golang") == 0) return LANG_GO;
+    if (strcmp(buf, "js") == 0 || strcmp(buf, "javascript") == 0 ||
+        strcmp(buf, "ts") == 0 || strcmp(buf, "typescript") == 0 ||
+        strcmp(buf, "jsx") == 0 || strcmp(buf, "tsx") == 0 ||
+        strcmp(buf, "mjs") == 0 || strcmp(buf, "cjs") == 0) return LANG_JS;
+    if (strcmp(buf, "python") == 0 || strcmp(buf, "py") == 0 || strcmp(buf, "python3") == 0) return LANG_PYTHON;
+    if (strcmp(buf, "json") == 0 || strcmp(buf, "jsonc") == 0 || strcmp(buf, "json5") == 0) return LANG_JSON;
+    if (strcmp(buf, "html") == 0 || strcmp(buf, "htm") == 0 ||
+        strcmp(buf, "xml") == 0 || strcmp(buf, "svg") == 0 || strcmp(buf, "xhtml") == 0) return LANG_HTML;
+    if (strcmp(buf, "css") == 0 || strcmp(buf, "scss") == 0 || strcmp(buf, "sass") == 0 || strcmp(buf, "less") == 0) return LANG_CSS;
+    if (strcmp(buf, "sql") == 0 || strcmp(buf, "mysql") == 0 || strcmp(buf, "pgsql") == 0 ||
+        strcmp(buf, "postgres") == 0 || strcmp(buf, "sqlite") == 0) return LANG_SQL;
+    if (strcmp(buf, "sh") == 0 || strcmp(buf, "bash") == 0 || strcmp(buf, "zsh") == 0 || strcmp(buf, "shell") == 0) return LANG_SHELL;
+    if (strcmp(buf, "ps1") == 0 || strcmp(buf, "powershell") == 0 || strcmp(buf, "ps") == 0) return LANG_POWERSHELL;
+    if (strcmp(buf, "bat") == 0 || strcmp(buf, "batch") == 0 || strcmp(buf, "cmd") == 0) return LANG_BATCH;
+    if (strcmp(buf, "yaml") == 0 || strcmp(buf, "yml") == 0) return LANG_YAML;
+    if (strcmp(buf, "diff") == 0 || strcmp(buf, "patch") == 0) return LANG_DIFF;
+    if (strcmp(buf, "md") == 0 || strcmp(buf, "markdown") == 0) return LANG_MARKDOWN;
+    if (strcmp(buf, "kotlin") == 0 || strcmp(buf, "kt") == 0 || strcmp(buf, "kts") == 0) return LANG_KOTLIN;
+    if (strcmp(buf, "lua") == 0) return LANG_LUA;
 
     return LANG_GENERIC;
 }
 
 /* ---------------- Language Tokenizers ---------------- */
 
-static void tokenize_c_family(TokBuf *tb, const wchar_t *text, int len, SynLang lang)
+static void tokenize_c_family(TokBuf *tb, const char *text, int len, SynLang lang)
 {
     int i = 0;
     const char *const *kws = g_gen_keywords;
@@ -492,71 +503,71 @@ static void tokenize_c_family(TokBuf *tb, const wchar_t *text, int len, SynLang 
     }
 
     while (i < len) {
-        wchar_t c = text[i];
+        char c = text[i];
 
         /* Whitespace */
-        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             i++;
             continue;
         }
 
         /* Line comment // */
-        if (c == L'/' && i + 1 < len && text[i + 1] == L'/') {
+        if (c == '/' && i + 1 < len && text[i + 1] == '/') {
             int start = i;
             i += 2;
-            while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
         /* Block comment /* */
-        if (c == L'/' && i + 1 < len && text[i + 1] == L'*') {
+        if (c == '/' && i + 1 < len && text[i + 1] == '*') {
             int start = i;
             i += 2;
-            while (i + 1 < len && !(text[i] == L'*' && text[i + 1] == L'/')) i++;
+            while (i + 1 < len && !(text[i] == '*' && text[i + 1] == '/')) i++;
             if (i + 1 < len) i += 2; else i = len;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
         /* Preprocessor # */
-        if (c == L'#') {
+        if (c == '#') {
             int start = i;
             int isLineStart = 1;
             int k = i - 1;
-            while (k >= 0 && text[k] != L'\n' && text[k] != L'\r') {
-                if (text[k] != L' ' && text[k] != L'\t') { isLineStart = 0; break; }
+            while (k >= 0 && text[k] != '\n' && text[k] != '\r') {
+                if (text[k] != ' ' && text[k] != '\t') { isLineStart = 0; break; }
                 k--;
             }
             if (isLineStart || lang == LANG_C || lang == LANG_CPP || lang == LANG_CSHARP) {
                 i++;
-                while (i < len && (is_alpha(text[i]) || text[i] == L'_')) i++;
+                while (i < len && (is_alpha(text[i]) || text[i] == '_')) i++;
                 tb_add(tb, start, i - start, SYN_PREPROC);
                 continue;
             } else if (lang == LANG_GENERIC) {
                 /* Script style # comment in generic */
                 i++;
-                while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+                while (i < len && text[i] != '\n' && text[i] != '\r') i++;
                 tb_add(tb, start, i - start, SYN_COMMENT);
                 continue;
             }
         }
 
         /* Annotations / Decorators: @name */
-        if (c == L'@' && (lang == LANG_JAVA || lang == LANG_CSHARP || lang == LANG_JS || lang == LANG_KOTLIN || lang == LANG_GENERIC)) {
+        if (c == '@' && (lang == LANG_JAVA || lang == LANG_CSHARP || lang == LANG_JS || lang == LANG_KOTLIN || lang == LANG_GENERIC)) {
             int start = i++;
-            while (i < len && (is_alnum(text[i]) || text[i] == L':')) i++;
+            while (i < len && (is_alnum(text[i]) || text[i] == ':')) i++;
             tb_add(tb, start, i - start, SYN_PREPROC);
             continue;
         }
 
         /* Triple quotes """ (Kotlin, Java text blocks) */
-        if (c == L'"' && i + 2 < len && text[i + 1] == L'"' && text[i + 2] == L'"' &&
+        if (c == '"' && i + 2 < len && text[i + 1] == '"' && text[i + 2] == '"' &&
             (lang == LANG_KOTLIN || lang == LANG_JAVA || lang == LANG_GENERIC)) {
             int start = i;
             i += 3;
-            while (i + 2 < len && !(text[i] == L'"' && text[i + 1] == L'"' && text[i + 2] == L'"')) {
-                if (text[i] == L'\\' && i + 1 < len) i++;
+            while (i + 2 < len && !(text[i] == '"' && text[i + 1] == '"' && text[i + 2] == '"')) {
+                if (text[i] == '\\' && i + 1 < len) i++;
                 i++;
             }
             if (i + 2 < len) i += 3; else i = len;
@@ -565,61 +576,61 @@ static void tokenize_c_family(TokBuf *tb, const wchar_t *text, int len, SynLang 
         }
 
         /* Strings: double quotes "..." */
-        if (c == L'"') {
+        if (c == '"') {
             int start = i++;
-            while (i < len && text[i] != L'"') {
-                if (text[i] == L'\\' && i + 1 < len) i++;
-                else if (text[i] == L'\n' && lang != LANG_JS && lang != LANG_GO) break;
+            while (i < len && text[i] != '"') {
+                if (text[i] == '\\' && i + 1 < len) i++;
+                else if (text[i] == '\n' && lang != LANG_JS && lang != LANG_GO) break;
                 i++;
             }
-            if (i < len && text[i] == L'"') i++;
+            if (i < len && text[i] == '"') i++;
             tb_add(tb, start, i - start, SYN_STRING);
             continue;
         }
 
         /* Strings: single quotes '...' */
-        if (c == L'\'') {
+        if (c == '\'') {
             int start = i++;
-            while (i < len && text[i] != L'\'') {
-                if (text[i] == L'\\' && i + 1 < len) i++;
-                else if (text[i] == L'\n') break;
+            while (i < len && text[i] != '\'') {
+                if (text[i] == '\\' && i + 1 < len) i++;
+                else if (text[i] == '\n') break;
                 i++;
             }
-            if (i < len && text[i] == L'\'') i++;
+            if (i < len && text[i] == '\'') i++;
             tb_add(tb, start, i - start, SYN_STRING);
             continue;
         }
 
         /* JS/TS template strings or Go raw strings: `...` */
-        if (c == L'`' && (lang == LANG_JS || lang == LANG_GO || lang == LANG_GENERIC)) {
+        if (c == '`' && (lang == LANG_JS || lang == LANG_GO || lang == LANG_GENERIC)) {
             int start = i++;
-            while (i < len && text[i] != L'`') {
-                if (text[i] == L'\\' && i + 1 < len) i++;
+            while (i < len && text[i] != '`') {
+                if (text[i] == '\\' && i + 1 < len) i++;
                 i++;
             }
-            if (i < len && text[i] == L'`') i++;
+            if (i < len && text[i] == '`') i++;
             tb_add(tb, start, i - start, SYN_STRING);
             continue;
         }
 
         /* Numbers */
-        if (is_digit(c) || (c == L'.' && i + 1 < len && is_digit(text[i + 1]))) {
+        if (is_digit(c) || (c == '.' && i + 1 < len && is_digit(text[i + 1]))) {
             int start = i;
-            if (c == L'0' && i + 1 < len && (text[i + 1] == L'x' || text[i + 1] == L'X')) {
+            if (c == '0' && i + 1 < len && (text[i + 1] == 'x' || text[i + 1] == 'X')) {
                 i += 2;
-                while (i < len && (is_hex(text[i]) || text[i] == L'_')) i++;
-            } else if (c == L'0' && i + 1 < len && (text[i + 1] == L'b' || text[i + 1] == L'B')) {
+                while (i < len && (is_hex(text[i]) || text[i] == '_')) i++;
+            } else if (c == '0' && i + 1 < len && (text[i + 1] == 'b' || text[i + 1] == 'B')) {
                 i += 2;
-                while (i < len && (text[i] == L'0' || text[i] == L'1' || text[i] == L'_')) i++;
+                while (i < len && (text[i] == '0' || text[i] == '1' || text[i] == '_')) i++;
             } else {
-                while (i < len && (is_digit(text[i]) || text[i] == L'_' || text[i] == L'.')) i++;
-                if (i < len && (text[i] == L'e' || text[i] == L'E')) {
+                while (i < len && (is_digit(text[i]) || text[i] == '_' || text[i] == '.')) i++;
+                if (i < len && (text[i] == 'e' || text[i] == 'E')) {
                     i++;
-                    if (i < len && (text[i] == L'+' || text[i] == L'-')) i++;
+                    if (i < len && (text[i] == '+' || text[i] == '-')) i++;
                     while (i < len && is_digit(text[i])) i++;
                 }
             }
-            while (i < len && (is_alpha(text[i]) || text[i] == L'%')) i++;
+            while (i < len && (is_alpha(text[i]) || text[i] == '%')) i++;
             tb_add(tb, start, i - start, SYN_NUMBER);
             continue;
         }
@@ -647,14 +658,14 @@ static void tokenize_c_family(TokBuf *tb, const wchar_t *text, int len, SynLang 
 
             /* Check if followed by ( -> function call */
             p = i;
-            while (p < len && (text[p] == L' ' || text[p] == L'\t')) p++;
-            if (p < len && text[p] == L'(') {
+            while (p < len && (text[p] == ' ' || text[p] == '\t')) p++;
+            if (p < len && text[p] == '(') {
                 tb_add(tb, start, tokLen, SYN_FUNCTION);
                 continue;
             }
 
             /* Generic capitalize convention: TypeName */
-            if (text[start] >= L'A' && text[start] <= L'Z' && (lang == LANG_RUST || lang == LANG_JAVA || lang == LANG_CSHARP || lang == LANG_KOTLIN)) {
+            if (text[start] >= 'A' && text[start] <= 'Z' && (lang == LANG_RUST || lang == LANG_JAVA || lang == LANG_CSHARP || lang == LANG_KOTLIN)) {
                 tb_add(tb, start, tokLen, SYN_TYPE);
                 continue;
             }
@@ -663,9 +674,9 @@ static void tokenize_c_family(TokBuf *tb, const wchar_t *text, int len, SynLang 
         }
 
         /* Operators */
-        if (wcschr(L"+-*/%=&|!^~?:<>", c)) {
+        if (c && strchr("+-*/%=&|!^~?:<>", c)) {
             int start = i++;
-            while (i < len && wcschr(L"+-*/%=&|!^~?:<>", text[i])) i++;
+            while (i < len && text[i] && strchr("+-*/%=&|!^~?:<>", text[i])) i++;
             tb_add(tb, start, i - start, SYN_OPERATOR);
             continue;
         }
@@ -674,31 +685,31 @@ static void tokenize_c_family(TokBuf *tb, const wchar_t *text, int len, SynLang 
     }
 }
 
-static void tokenize_python(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_python(TokBuf *tb, const char *text, int len)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
+        char c = text[i];
 
-        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             i++;
             continue;
         }
 
         /* Comment # */
-        if (c == L'#') {
+        if (c == '#') {
             int start = i++;
-            while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
         /* Triple quotes """ or ''' */
-        if ((c == L'"' || c == L'\'') && i + 2 < len && text[i + 1] == c && text[i + 2] == c) {
+        if ((c == '"' || c == '\'') && i + 2 < len && text[i + 1] == c && text[i + 2] == c) {
             int start = i;
             i += 3;
             while (i + 2 < len && !(text[i] == c && text[i + 1] == c && text[i + 2] == c)) {
-                if (text[i] == L'\\' && i + 1 < len) i++;
+                if (text[i] == '\\' && i + 1 < len) i++;
                 i++;
             }
             if (i + 2 < len) i += 3; else i = len;
@@ -707,11 +718,11 @@ static void tokenize_python(TokBuf *tb, const wchar_t *text, int len)
         }
 
         /* String literals "..." or '...' */
-        if (c == L'"' || c == L'\'') {
+        if (c == '"' || c == '\'') {
             int start = i++;
             while (i < len && text[i] != c) {
-                if (text[i] == L'\\' && i + 1 < len) i++;
-                else if (text[i] == L'\n') break;
+                if (text[i] == '\\' && i + 1 < len) i++;
+                else if (text[i] == '\n') break;
                 i++;
             }
             if (i < len && text[i] == c) i++;
@@ -720,31 +731,31 @@ static void tokenize_python(TokBuf *tb, const wchar_t *text, int len)
         }
 
         /* Decorator: @name */
-        if (c == L'@') {
+        if (c == '@') {
             int start = i++;
-            while (i < len && (is_alnum(text[i]) || text[i] == L'.')) i++;
+            while (i < len && (is_alnum(text[i]) || text[i] == '.')) i++;
             tb_add(tb, start, i - start, SYN_PREPROC);
             continue;
         }
 
         /* Numbers */
-        if (is_digit(c) || (c == L'.' && i + 1 < len && is_digit(text[i + 1]))) {
+        if (is_digit(c) || (c == '.' && i + 1 < len && is_digit(text[i + 1]))) {
             int start = i;
-            if (c == L'0' && i + 1 < len && (text[i + 1] == L'x' || text[i + 1] == L'X')) {
+            if (c == '0' && i + 1 < len && (text[i + 1] == 'x' || text[i + 1] == 'X')) {
                 i += 2;
-                while (i < len && (is_hex(text[i]) || text[i] == L'_')) i++;
-            } else if (c == L'0' && i + 1 < len && (text[i + 1] == L'b' || text[i + 1] == L'B')) {
+                while (i < len && (is_hex(text[i]) || text[i] == '_')) i++;
+            } else if (c == '0' && i + 1 < len && (text[i + 1] == 'b' || text[i + 1] == 'B')) {
                 i += 2;
-                while (i < len && (text[i] == L'0' || text[i] == L'1' || text[i] == L'_')) i++;
+                while (i < len && (text[i] == '0' || text[i] == '1' || text[i] == '_')) i++;
             } else {
-                while (i < len && (is_digit(text[i]) || text[i] == L'_' || text[i] == L'.')) i++;
-                if (i < len && (text[i] == L'e' || text[i] == L'E')) {
+                while (i < len && (is_digit(text[i]) || text[i] == '_' || text[i] == '.')) i++;
+                if (i < len && (text[i] == 'e' || text[i] == 'E')) {
                     i++;
-                    if (i < len && (text[i] == L'+' || text[i] == L'-')) i++;
+                    if (i < len && (text[i] == '+' || text[i] == '-')) i++;
                     while (i < len && is_digit(text[i])) i++;
                 }
             }
-            if (i < len && (text[i] == L'j' || text[i] == L'J')) i++;
+            if (i < len && (text[i] == 'j' || text[i] == 'J')) i++;
             tb_add(tb, start, i - start, SYN_NUMBER);
             continue;
         }
@@ -758,23 +769,22 @@ static void tokenize_python(TokBuf *tb, const wchar_t *text, int len)
             tokLen = i - start;
 
             /* Check prefix for string e.g. f"...", r"...", b"..." */
-            if ((tokLen == 1 || tokLen == 2) && i < len && (text[i] == L'"' || text[i] == L'\'')) {
-                wchar_t p0 = text[start];
-                if (p0 == L'r' || p0 == L'f' || p0 == L'b' || p0 == L'u' || p0 == L'R' || p0 == L'F' || p0 == L'B') {
-                    wchar_t sc = text[i];
-                    /* Scan string with prefix */
+            if ((tokLen == 1 || tokLen == 2) && i < len && (text[i] == '"' || text[i] == '\'')) {
+                char p0 = text[start];
+                if (p0 == 'r' || p0 == 'f' || p0 == 'b' || p0 == 'u' || p0 == 'R' || p0 == 'F' || p0 == 'B') {
+                    char sc = text[i];
                     if (i + 2 < len && text[i + 1] == sc && text[i + 2] == sc) {
                         i += 3;
                         while (i + 2 < len && !(text[i] == sc && text[i + 1] == sc && text[i + 2] == sc)) {
-                            if (text[i] == L'\\' && i + 1 < len) i++;
+                            if (text[i] == '\\' && i + 1 < len) i++;
                             i++;
                         }
                         if (i + 2 < len) i += 3; else i = len;
                     } else {
                         i++;
                         while (i < len && text[i] != sc) {
-                            if (text[i] == L'\\' && i + 1 < len) i++;
-                            else if (text[i] == L'\n') break;
+                            if (text[i] == '\\' && i + 1 < len) i++;
+                            else if (text[i] == '\n') break;
                             i++;
                         }
                         if (i < len && text[i] == sc) i++;
@@ -798,8 +808,8 @@ static void tokenize_python(TokBuf *tb, const wchar_t *text, int len)
             }
 
             p = i;
-            while (p < len && (text[p] == L' ' || text[p] == L'\t')) p++;
-            if (p < len && text[p] == L'(') {
+            while (p < len && (text[p] == ' ' || text[p] == '\t')) p++;
+            if (p < len && text[p] == '(') {
                 tb_add(tb, start, tokLen, SYN_FUNCTION);
                 continue;
             }
@@ -807,9 +817,9 @@ static void tokenize_python(TokBuf *tb, const wchar_t *text, int len)
             continue;
         }
 
-        if (wcschr(L"+-*/%=&|!^~?:<>", c)) {
+        if (c && strchr("+-*/%=&|!^~?:<>", c)) {
             int start = i++;
-            while (i < len && wcschr(L"+-*/%=&|!^~?:<>", text[i])) i++;
+            while (i < len && text[i] && strchr("+-*/%=&|!^~?:<>", text[i])) i++;
             tb_add(tb, start, i - start, SYN_OPERATOR);
             continue;
         }
@@ -818,34 +828,34 @@ static void tokenize_python(TokBuf *tb, const wchar_t *text, int len)
     }
 }
 
-static void tokenize_json(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_json(TokBuf *tb, const char *text, int len)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
-        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') { i++; continue; }
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
 
-        if (c == L'"') {
+        if (c == '"') {
             int start = i++;
             int isKey = 0;
             int p;
-            while (i < len && text[i] != L'"') {
-                if (text[i] == L'\\' && i + 1 < len) i++;
+            while (i < len && text[i] != '"') {
+                if (text[i] == '\\' && i + 1 < len) i++;
                 i++;
             }
-            if (i < len && text[i] == L'"') i++;
+            if (i < len && text[i] == '"') i++;
 
             p = i;
-            while (p < len && (text[p] == L' ' || text[p] == L'\t' || text[p] == L'\r' || text[p] == L'\n')) p++;
-            if (p < len && text[p] == L':') isKey = 1;
+            while (p < len && (text[p] == ' ' || text[p] == '\t' || text[p] == '\r' || text[p] == '\n')) p++;
+            if (p < len && text[p] == ':') isKey = 1;
 
             tb_add(tb, start, i - start, isKey ? SYN_KEYWORD : SYN_STRING);
             continue;
         }
 
-        if (is_digit(c) || c == L'-') {
+        if (is_digit(c) || c == '-') {
             int start = i++;
-            while (i < len && (is_digit(text[i]) || text[i] == L'.' || text[i] == L'e' || text[i] == L'E' || text[i] == L'+' || text[i] == L'-')) i++;
+            while (i < len && (is_digit(text[i]) || text[i] == '.' || text[i] == 'e' || text[i] == 'E' || text[i] == '+' || text[i] == '-')) i++;
             tb_add(tb, start, i - start, SYN_NUMBER);
             continue;
         }
@@ -861,7 +871,7 @@ static void tokenize_json(TokBuf *tb, const wchar_t *text, int len)
             continue;
         }
 
-        if (c == L'{' || c == L'}' || c == L'[' || c == L']' || c == L':' || c == L',') {
+        if (c == '{' || c == '}' || c == '[' || c == ']' || c == ':' || c == ',') {
             tb_add(tb, i, 1, SYN_OPERATOR);
             i++;
             continue;
@@ -871,58 +881,58 @@ static void tokenize_json(TokBuf *tb, const wchar_t *text, int len)
     }
 }
 
-static void tokenize_html(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_html(TokBuf *tb, const char *text, int len)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
+        char c = text[i];
 
-        if (c == L'<' && i + 3 < len && text[i + 1] == L'!' && text[i + 2] == L'-' && text[i + 3] == L'-') {
+        if (c == '<' && i + 3 < len && text[i + 1] == '!' && text[i + 2] == '-' && text[i + 3] == '-') {
             int start = i;
             i += 4;
-            while (i + 2 < len && !(text[i] == L'-' && text[i + 1] == L'-' && text[i + 2] == L'>')) i++;
+            while (i + 2 < len && !(text[i] == '-' && text[i + 1] == '-' && text[i + 2] == '>')) i++;
             if (i + 2 < len) i += 3; else i = len;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
-        if (c == L'<' && i + 1 < len && (text[i + 1] == L'!' || text[i + 1] == L'?')) {
+        if (c == '<' && i + 1 < len && (text[i + 1] == '!' || text[i + 1] == '?')) {
             int start = i;
-            while (i < len && text[i] != L'>') i++;
+            while (i < len && text[i] != '>') i++;
             if (i < len) i++;
             tb_add(tb, start, i - start, SYN_PREPROC);
             continue;
         }
 
-        if (c == L'<') {
+        if (c == '<') {
             int startTag = i++;
             tb_add(tb, startTag, 1, SYN_OPERATOR);
-            if (i < len && text[i] == L'/') {
+            if (i < len && text[i] == '/') {
                 tb_add(tb, i, 1, SYN_OPERATOR);
                 i++;
             }
             /* Tag name */
             if (i < len && is_alpha(text[i])) {
                 int nameStart = i;
-                while (i < len && (is_alnum(text[i]) || text[i] == L'-' || text[i] == L':')) i++;
+                while (i < len && (is_alnum(text[i]) || text[i] == '-' || text[i] == ':')) i++;
                 tb_add(tb, nameStart, i - nameStart, SYN_KEYWORD);
             }
 
             /* Tag attributes until > */
-            while (i < len && text[i] != L'>') {
-                wchar_t ac = text[i];
-                if (ac == L' ' || ac == L'\t' || ac == L'\r' || ac == L'\n') { i++; continue; }
-                if (ac == L'/' && i + 1 < len && text[i + 1] == L'>') {
+            while (i < len && text[i] != '>') {
+                char ac = text[i];
+                if (ac == ' ' || ac == '\t' || ac == '\r' || ac == '\n') { i++; continue; }
+                if (ac == '/' && i + 1 < len && text[i + 1] == '>') {
                     tb_add(tb, i, 2, SYN_OPERATOR);
                     i += 2;
                     break;
                 }
-                if (ac == L'=') {
+                if (ac == '=') {
                     tb_add(tb, i, 1, SYN_OPERATOR);
                     i++;
                     continue;
                 }
-                if (ac == L'"' || ac == L'\'') {
+                if (ac == '"' || ac == '\'') {
                     int sStart = i++;
                     while (i < len && text[i] != ac) i++;
                     if (i < len && text[i] == ac) i++;
@@ -931,23 +941,23 @@ static void tokenize_html(TokBuf *tb, const wchar_t *text, int len)
                 }
                 if (is_alpha(ac)) {
                     int aStart = i;
-                    while (i < len && (is_alnum(text[i]) || text[i] == L'-' || text[i] == L':')) i++;
+                    while (i < len && (is_alnum(text[i]) || text[i] == '-' || text[i] == ':')) i++;
                     tb_add(tb, aStart, i - aStart, SYN_TYPE);
                     continue;
                 }
                 i++;
             }
-            if (i < len && text[i] == L'>') {
+            if (i < len && text[i] == '>') {
                 tb_add(tb, i, 1, SYN_OPERATOR);
                 i++;
             }
             continue;
         }
 
-        if (c == L'&') {
+        if (c == '&') {
             int start = i++;
             while (i < len && is_alnum(text[i])) i++;
-            if (i < len && text[i] == L';') i++;
+            if (i < len && text[i] == ';') i++;
             tb_add(tb, start, i - start, SYN_NUMBER);
             continue;
         }
@@ -956,33 +966,33 @@ static void tokenize_html(TokBuf *tb, const wchar_t *text, int len)
     }
 }
 
-static void tokenize_css(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_css(TokBuf *tb, const char *text, int len)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
-        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') { i++; continue; }
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
 
-        if (c == L'/' && i + 1 < len && text[i + 1] == L'*') {
+        if (c == '/' && i + 1 < len && text[i + 1] == '*') {
             int start = i;
             i += 2;
-            while (i + 1 < len && !(text[i] == L'*' && text[i + 1] == L'/')) i++;
+            while (i + 1 < len && !(text[i] == '*' && text[i + 1] == '/')) i++;
             if (i + 1 < len) i += 2; else i = len;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
-        if (c == L'@') {
+        if (c == '@') {
             int start = i++;
-            while (i < len && (is_alnum(text[i]) || text[i] == L'-')) i++;
+            while (i < len && (is_alnum(text[i]) || text[i] == '-')) i++;
             tb_add(tb, start, i - start, SYN_PREPROC);
             continue;
         }
 
-        if (c == L'"' || c == L'\'') {
+        if (c == '"' || c == '\'') {
             int start = i++;
             while (i < len && text[i] != c) {
-                if (text[i] == L'\\' && i + 1 < len) i++;
+                if (text[i] == '\\' && i + 1 < len) i++;
                 i++;
             }
             if (i < len && text[i] == c) i++;
@@ -990,7 +1000,7 @@ static void tokenize_css(TokBuf *tb, const wchar_t *text, int len)
             continue;
         }
 
-        if (c == L'#' && i + 1 < len && is_hex(text[i + 1])) {
+        if (c == '#' && i + 1 < len && is_hex(text[i + 1])) {
             int start = i++;
             while (i < len && is_hex(text[i])) i++;
             tb_add(tb, start, i - start, SYN_NUMBER);
@@ -999,25 +1009,25 @@ static void tokenize_css(TokBuf *tb, const wchar_t *text, int len)
 
         if (is_digit(c)) {
             int start = i++;
-            while (i < len && (is_digit(text[i]) || text[i] == L'.')) i++;
-            while (i < len && (is_alpha(text[i]) || text[i] == L'%')) i++;
+            while (i < len && (is_digit(text[i]) || text[i] == '.')) i++;
+            while (i < len && (is_alpha(text[i]) || text[i] == '%')) i++;
             tb_add(tb, start, i - start, SYN_NUMBER);
             continue;
         }
 
-        if (is_alpha(c) || c == L'-') {
+        if (is_alpha(c) || c == '-') {
             int start = i;
             int p;
-            while (i < len && (is_alnum(text[i]) || text[i] == L'-')) i++;
+            while (i < len && (is_alnum(text[i]) || text[i] == '-')) i++;
             p = i;
-            while (p < len && (text[p] == L' ' || text[p] == L'\t')) p++;
-            if (p < len && text[p] == L':') {
+            while (p < len && (text[p] == ' ' || text[p] == '\t')) p++;
+            if (p < len && text[p] == ':') {
                 tb_add(tb, start, i - start, SYN_KEYWORD);
             }
             continue;
         }
 
-        if (c == L'{' || c == L'}' || c == L':' || c == L';' || c == L',' || c == L'>') {
+        if (c == '{' || c == '}' || c == ':' || c == ';' || c == ',' || c == '>') {
             tb_add(tb, i, 1, SYN_OPERATOR);
             i++;
             continue;
@@ -1027,40 +1037,40 @@ static void tokenize_css(TokBuf *tb, const wchar_t *text, int len)
     }
 }
 
-static void tokenize_sql(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_sql(TokBuf *tb, const char *text, int len)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
-        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') { i++; continue; }
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
 
         /* Comment -- */
-        if (c == L'-' && i + 1 < len && text[i + 1] == L'-') {
+        if (c == '-' && i + 1 < len && text[i + 1] == '-') {
             int start = i;
             i += 2;
-            while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
         /* Comment /* */
-        if (c == L'/' && i + 1 < len && text[i + 1] == L'*') {
+        if (c == '/' && i + 1 < len && text[i + 1] == '*') {
             int start = i;
             i += 2;
-            while (i + 1 < len && !(text[i] == L'*' && text[i + 1] == L'/')) i++;
+            while (i + 1 < len && !(text[i] == '*' && text[i + 1] == '/')) i++;
             if (i + 1 < len) i += 2; else i = len;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
         /* String '...' */
-        if (c == L'\'') {
+        if (c == '\'') {
             int start = i++;
-            while (i < len && text[i] != L'\'') {
-                if (text[i] == L'\\' && i + 1 < len) i++;
+            while (i < len && text[i] != '\'') {
+                if (text[i] == '\\' && i + 1 < len) i++;
                 i++;
             }
-            if (i < len && text[i] == L'\'') i++;
+            if (i < len && text[i] == '\'') i++;
             tb_add(tb, start, i - start, SYN_STRING);
             continue;
         }
@@ -1068,7 +1078,7 @@ static void tokenize_sql(TokBuf *tb, const wchar_t *text, int len)
         /* Number */
         if (is_digit(c)) {
             int start = i++;
-            while (i < len && (is_digit(text[i]) || text[i] == L'.')) i++;
+            while (i < len && (is_digit(text[i]) || text[i] == '.')) i++;
             tb_add(tb, start, i - start, SYN_NUMBER);
             continue;
         }
@@ -1077,7 +1087,7 @@ static void tokenize_sql(TokBuf *tb, const wchar_t *text, int len)
         if (is_alpha(c)) {
             int start = i;
             int tokLen;
-            while (i < len && (is_alnum(text[i]) || text[i] == L'_')) i++;
+            while (i < len && (is_alnum(text[i]) || text[i] == '_')) i++;
             tokLen = i - start;
 
             if (is_in_list_ci(text + start, tokLen, g_sql_keywords)) {
@@ -1095,7 +1105,7 @@ static void tokenize_sql(TokBuf *tb, const wchar_t *text, int len)
             continue;
         }
 
-        if (wcschr(L"=<>!+-*/,();", c)) {
+        if (c && strchr("=<>!+-*/,();", c)) {
             tb_add(tb, i, 1, SYN_OPERATOR);
             i++;
             continue;
@@ -1105,37 +1115,37 @@ static void tokenize_sql(TokBuf *tb, const wchar_t *text, int len)
     }
 }
 
-static void tokenize_shell(TokBuf *tb, const wchar_t *text, int len, SynLang lang)
+static void tokenize_shell(TokBuf *tb, const char *text, int len, SynLang lang)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
-        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') { i++; continue; }
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
 
         /* Comment # */
-        if (c == L'#' && lang != LANG_BATCH) {
+        if (c == '#' && lang != LANG_BATCH) {
             int start = i++;
-            while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
         /* Batch comment REM or :: */
         if (lang == LANG_BATCH) {
-            if (c == L':' && i + 1 < len && text[i + 1] == L':') {
+            if (c == ':' && i + 1 < len && text[i + 1] == ':') {
                 int start = i;
-                while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+                while (i < len && text[i] != '\n' && text[i] != '\r') i++;
                 tb_add(tb, start, i - start, SYN_COMMENT);
                 continue;
             }
         }
 
         /* Strings "..." and '...' */
-        if (c == L'"' || c == L'\'') {
+        if (c == '"' || c == '\'') {
             int start = i++;
             while (i < len && text[i] != c) {
-                if (text[i] == L'\\' && i + 1 < len) i++;
-                else if (text[i] == L'\n') break;
+                if (text[i] == '\\' && i + 1 < len) i++;
+                else if (text[i] == '\n') break;
                 i++;
             }
             if (i < len && text[i] == c) i++;
@@ -1144,16 +1154,16 @@ static void tokenize_shell(TokBuf *tb, const wchar_t *text, int len, SynLang lan
         }
 
         /* Variables: $VAR, ${VAR}, %VAR% */
-        if (c == L'$' || (lang == LANG_BATCH && c == L'%')) {
+        if (c == '$' || (lang == LANG_BATCH && c == '%')) {
             int start = i++;
-            if (i < len && text[i] == L'{') {
-                while (i < len && text[i] != L'}') i++;
-                if (i < len && text[i] == L'}') i++;
-            } else if (c == L'%' && lang == LANG_BATCH) {
-                while (i < len && text[i] != L'%') i++;
-                if (i < len && text[i] == L'%') i++;
+            if (i < len && text[i] == '{') {
+                while (i < len && text[i] != '}') i++;
+                if (i < len && text[i] == '}') i++;
+            } else if (c == '%' && lang == LANG_BATCH) {
+                while (i < len && text[i] != '%') i++;
+                if (i < len && text[i] == '%') i++;
             } else {
-                while (i < len && (is_alnum(text[i]) || text[i] == L'_')) i++;
+                while (i < len && (is_alnum(text[i]) || text[i] == '_')) i++;
             }
             tb_add(tb, start, i - start, SYN_TYPE);
             continue;
@@ -1163,12 +1173,12 @@ static void tokenize_shell(TokBuf *tb, const wchar_t *text, int len, SynLang lan
         if (is_alpha(c)) {
             int start = i;
             int tokLen;
-            while (i < len && (is_alnum(text[i]) || text[i] == L'_' || text[i] == L'-')) i++;
+            while (i < len && (is_alnum(text[i]) || text[i] == '_' || text[i] == '-')) i++;
             tokLen = i - start;
 
             if (lang == LANG_BATCH) {
                 if (match_kw_ci(text + start, tokLen, "rem")) {
-                    while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+                    while (i < len && text[i] != '\n' && text[i] != '\r') i++;
                     tb_add(tb, start, i - start, SYN_COMMENT);
                     continue;
                 }
@@ -1206,7 +1216,7 @@ static void tokenize_shell(TokBuf *tb, const wchar_t *text, int len, SynLang lan
             continue;
         }
 
-        if (wcschr(L"|&;><=(){}[]", c)) {
+        if (c && strchr("|&;><=(){}[]", c)) {
             tb_add(tb, i, 1, SYN_OPERATOR);
             i++;
             continue;
@@ -1216,24 +1226,24 @@ static void tokenize_shell(TokBuf *tb, const wchar_t *text, int len, SynLang lan
     }
 }
 
-static void tokenize_yaml(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_yaml(TokBuf *tb, const char *text, int len)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
-        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') { i++; continue; }
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') { i++; continue; }
 
-        if (c == L'#') {
+        if (c == '#') {
             int start = i++;
-            while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
-        if (c == L'"' || c == L'\'') {
+        if (c == '"' || c == '\'') {
             int start = i++;
             while (i < len && text[i] != c) {
-                if (text[i] == L'\\' && i + 1 < len) i++;
+                if (text[i] == '\\' && i + 1 < len) i++;
                 i++;
             }
             if (i < len && text[i] == c) i++;
@@ -1241,22 +1251,22 @@ static void tokenize_yaml(TokBuf *tb, const wchar_t *text, int len)
             continue;
         }
 
-        if (is_digit(c) || c == L'-') {
+        if (is_digit(c) || c == '-') {
             if (is_digit(c) || (i + 1 < len && is_digit(text[i + 1]))) {
                 int start = i++;
-                while (i < len && (is_digit(text[i]) || text[i] == L'.' || text[i] == L'_')) i++;
+                while (i < len && (is_digit(text[i]) || text[i] == '.' || text[i] == '_')) i++;
                 tb_add(tb, start, i - start, SYN_NUMBER);
                 continue;
             }
         }
 
-        if (is_alpha(c) || c == L'_') {
+        if (is_alpha(c) || c == '_') {
             int start = i;
             int p;
-            while (i < len && (is_alnum(text[i]) || text[i] == L'_' || text[i] == L'-')) i++;
+            while (i < len && (is_alnum(text[i]) || text[i] == '_' || text[i] == '-')) i++;
             p = i;
-            while (p < len && (text[p] == L' ' || text[p] == L'\t')) p++;
-            if (p < len && text[p] == L':') {
+            while (p < len && (text[p] == ' ' || text[p] == '\t')) p++;
+            if (p < len && text[p] == ':') {
                 tb_add(tb, start, i - start, SYN_KEYWORD);
                 continue;
             }
@@ -1269,7 +1279,7 @@ static void tokenize_yaml(TokBuf *tb, const wchar_t *text, int len)
             continue;
         }
 
-        if (c == L':' || c == L'-' || c == L'{' || c == L'}' || c == L'[' || c == L']') {
+        if (c == ':' || c == '-' || c == '{' || c == '}' || c == '[' || c == ']') {
             tb_add(tb, i, 1, SYN_OPERATOR);
             i++;
             continue;
@@ -1279,52 +1289,52 @@ static void tokenize_yaml(TokBuf *tb, const wchar_t *text, int len)
     }
 }
 
-static void tokenize_diff(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_diff(TokBuf *tb, const char *text, int len)
 {
     int lineStart = 0;
     while (lineStart < len) {
         int lineEnd = lineStart;
-        wchar_t first;
-        while (lineEnd < len && text[lineEnd] != L'\n' && text[lineEnd] != L'\r') lineEnd++;
+        char first;
+        while (lineEnd < len && text[lineEnd] != '\n' && text[lineEnd] != '\r') lineEnd++;
         first = (lineStart < lineEnd) ? text[lineStart] : 0;
 
-        if (first == L'+' && !(lineStart + 2 < lineEnd && text[lineStart + 1] == L'+' && text[lineStart + 2] == L'+')) {
+        if (first == '+' && !(lineStart + 2 < lineEnd && text[lineStart + 1] == '+' && text[lineStart + 2] == '+')) {
             tb_add(tb, lineStart, lineEnd - lineStart, SYN_TYPE); /* Green / Add */
-        } else if (first == L'-' && !(lineStart + 2 < lineEnd && text[lineStart + 1] == L'-' && text[lineStart + 2] == L'-')) {
+        } else if (first == '-' && !(lineStart + 2 < lineEnd && text[lineStart + 1] == '-' && text[lineStart + 2] == '-')) {
             tb_add(tb, lineStart, lineEnd - lineStart, SYN_KEYWORD); /* Red / Remove */
-        } else if (first == L'@' && lineStart + 1 < lineEnd && text[lineStart + 1] == L'@') {
+        } else if (first == '@' && lineStart + 1 < lineEnd && text[lineStart + 1] == '@') {
             tb_add(tb, lineStart, lineEnd - lineStart, SYN_PREPROC); /* Chunk header */
-        } else if (lineStart + 4 <= lineEnd && (wcsncmp(text + lineStart, L"diff", 4) == 0 || wcsncmp(text + lineStart, L"index", 5) == 0)) {
+        } else if (lineStart + 4 <= lineEnd && (strncmp(text + lineStart, "diff", 4) == 0 || (lineStart + 5 <= lineEnd && strncmp(text + lineStart, "index", 5) == 0))) {
             tb_add(tb, lineStart, lineEnd - lineStart, SYN_COMMENT);
         }
 
-        if (lineEnd < len && text[lineEnd] == L'\r') lineEnd++;
-        if (lineEnd < len && text[lineEnd] == L'\n') lineEnd++;
+        if (lineEnd < len && text[lineEnd] == '\r') lineEnd++;
+        if (lineEnd < len && text[lineEnd] == '\n') lineEnd++;
         lineStart = lineEnd;
     }
 }
 
-static void tokenize_markdown(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_markdown(TokBuf *tb, const char *text, int len)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
-        if (c == L'#') {
+        char c = text[i];
+        if (c == '#') {
             int start = i++;
-            while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
             tb_add(tb, start, i - start, SYN_KEYWORD);
             continue;
         }
-        if (c == L'>') {
+        if (c == '>') {
             int start = i++;
-            while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
-        if (c == L'`') {
+        if (c == '`') {
             int start = i++;
-            while (i < len && text[i] != L'`') i++;
-            if (i < len && text[i] == L'`') i++;
+            while (i < len && text[i] != '`') i++;
+            if (i < len && text[i] == '`') i++;
             tb_add(tb, start, i - start, SYN_STRING);
             continue;
         }
@@ -1332,33 +1342,33 @@ static void tokenize_markdown(TokBuf *tb, const wchar_t *text, int len)
     }
 }
 
-static void tokenize_lua(TokBuf *tb, const wchar_t *text, int len)
+static void tokenize_lua(TokBuf *tb, const char *text, int len)
 {
     int i = 0;
     while (i < len) {
-        wchar_t c = text[i];
-        if (c == L' ' || c == L'\t' || c == L'\r' || c == L'\n') {
+        char c = text[i];
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') {
             i++;
             continue;
         }
 
         /* Comment -- */
-        if (c == L'-' && i + 1 < len && text[i + 1] == L'-') {
+        if (c == '-' && i + 1 < len && text[i + 1] == '-') {
             int start = i;
             i += 2;
             /* Check if multi-line comment: --[=*...[ */
-            if (i < len && text[i] == L'[') {
+            if (i < len && text[i] == '[') {
                 int numEq = 0;
                 int p = i + 1;
-                while (p < len && text[p] == L'=') { numEq++; p++; }
-                if (p < len && text[p] == L'[') {
+                while (p < len && text[p] == '=') { numEq++; p++; }
+                if (p < len && text[p] == '[') {
                     i = p + 1;
                     while (i < len) {
-                        if (text[i] == L']') {
+                        if (text[i] == ']') {
                             int closeEq = 0;
                             int q = i + 1;
-                            while (q < len && text[q] == L'=') { closeEq++; q++; }
-                            if (q < len && text[q] == L']' && closeEq == numEq) {
+                            while (q < len && text[q] == '=') { closeEq++; q++; }
+                            if (q < len && text[q] == ']' && closeEq == numEq) {
                                 i = q + 1;
                                 break;
                             }
@@ -1370,25 +1380,25 @@ static void tokenize_lua(TokBuf *tb, const wchar_t *text, int len)
                 }
             }
             /* Single-line comment */
-            while (i < len && text[i] != L'\n' && text[i] != L'\r') i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
             tb_add(tb, start, i - start, SYN_COMMENT);
             continue;
         }
 
         /* String: Multi-line literal [=*...[ */
-        if (c == L'[') {
+        if (c == '[') {
             int numEq = 0;
             int p = i + 1;
-            while (p < len && text[p] == L'=') { numEq++; p++; }
-            if (p < len && text[p] == L'[') {
+            while (p < len && text[p] == '=') { numEq++; p++; }
+            if (p < len && text[p] == '[') {
                 int start = i;
                 i = p + 1;
                 while (i < len) {
-                    if (text[i] == L']') {
+                    if (text[i] == ']') {
                         int closeEq = 0;
                         int q = i + 1;
-                        while (q < len && text[q] == L'=') { closeEq++; q++; }
-                        if (q < len && text[q] == L']' && closeEq == numEq) {
+                        while (q < len && text[q] == '=') { closeEq++; q++; }
+                        if (q < len && text[q] == ']' && closeEq == numEq) {
                             i = q + 1;
                             break;
                         }
@@ -1401,11 +1411,11 @@ static void tokenize_lua(TokBuf *tb, const wchar_t *text, int len)
         }
 
         /* String: "..." or '...' */
-        if (c == L'"' || c == L'\'') {
+        if (c == '"' || c == '\'') {
             int start = i++;
             while (i < len && text[i] != c) {
-                if (text[i] == L'\\' && i + 1 < len) i++;
-                else if (text[i] == L'\n') break;
+                if (text[i] == '\\' && i + 1 < len) i++;
+                else if (text[i] == '\n') break;
                 i++;
             }
             if (i < len && text[i] == c) i++;
@@ -1414,16 +1424,16 @@ static void tokenize_lua(TokBuf *tb, const wchar_t *text, int len)
         }
 
         /* Numbers */
-        if (is_digit(c) || (c == L'.' && i + 1 < len && is_digit(text[i + 1]))) {
+        if (is_digit(c) || (c == '.' && i + 1 < len && is_digit(text[i + 1]))) {
             int start = i;
-            if (c == L'0' && i + 1 < len && (text[i + 1] == L'x' || text[i + 1] == L'X')) {
+            if (c == '0' && i + 1 < len && (text[i + 1] == 'x' || text[i + 1] == 'X')) {
                 i += 2;
-                while (i < len && (is_hex(text[i]) || text[i] == L'.' || text[i] == L'p' || text[i] == L'P' || text[i] == L'+' || text[i] == L'-')) i++;
+                while (i < len && (is_hex(text[i]) || text[i] == '.' || text[i] == 'p' || text[i] == 'P' || text[i] == '+' || text[i] == '-')) i++;
             } else {
-                while (i < len && (is_digit(text[i]) || text[i] == L'.')) i++;
-                if (i < len && (text[i] == L'e' || text[i] == L'E')) {
+                while (i < len && (is_digit(text[i]) || text[i] == '.')) i++;
+                if (i < len && (text[i] == 'e' || text[i] == 'E')) {
                     i++;
-                    if (i < len && (text[i] == L'+' || text[i] == L'-')) i++;
+                    if (i < len && (text[i] == '+' || text[i] == '-')) i++;
                     while (i < len && is_digit(text[i])) i++;
                 }
             }
@@ -1453,8 +1463,8 @@ static void tokenize_lua(TokBuf *tb, const wchar_t *text, int len)
             }
 
             p = i;
-            while (p < len && (text[p] == L' ' || text[p] == L'\t')) p++;
-            if (p < len && text[p] == L'(') {
+            while (p < len && (text[p] == ' ' || text[p] == '\t')) p++;
+            if (p < len && text[p] == '(') {
                 tb_add(tb, start, tokLen, SYN_FUNCTION);
                 continue;
             }
@@ -1462,16 +1472,16 @@ static void tokenize_lua(TokBuf *tb, const wchar_t *text, int len)
         }
 
         /* Operators */
-        if (c == L'.' && i + 1 < len && text[i + 1] == L'.') {
+        if (c == '.' && i + 1 < len && text[i + 1] == '.') {
             int start = i;
-            while (i < len && text[i] == L'.') i++;
+            while (i < len && text[i] == '.') i++;
             tb_add(tb, start, i - start, SYN_OPERATOR);
             continue;
         }
 
-        if (wcschr(L"+-*/%^#&~|<>=:", c)) {
+        if (c && strchr("+-*/%^#&~|<>=:", c)) {
             int start = i++;
-            while (i < len && wcschr(L"=<>~/", text[i])) i++;
+            while (i < len && text[i] && strchr("=<>~/", text[i])) i++;
             tb_add(tb, start, i - start, SYN_OPERATOR);
             continue;
         }
@@ -1482,7 +1492,7 @@ static void tokenize_lua(TokBuf *tb, const wchar_t *text, int len)
 
 /* ---------------- Public API ---------------- */
 
-SynToken *syntax_highlight(const wchar_t *lang, const wchar_t *text, int textlen, int *outCount)
+SynToken *syntax_highlight(const char *lang, const char *text, int textlen, int *outCount)
 {
     SynLang l;
     TokBuf tb;

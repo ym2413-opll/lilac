@@ -1,5 +1,7 @@
 /*
  * main.c - Lilac Win32 Markdown viewer application.
+ * Internal strings, paths, and document/layout structures are strictly UTF-8;
+ * UTF-16 conversion is performed only at Win32 API boundaries.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -10,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <ctype.h>
 #include <math.h>
 #include "util.h"
 #include "doc.h"
@@ -25,9 +28,9 @@
 #pragma comment(lib, "msimg32.lib")
 
 static const wchar_t g_className[] = L"LilacMainWindow";
-static const wchar_t g_sampleMarkdown[] =
-    L"# Lilac - Markdown 뷰어\n\n"
-    L"이 페이지는 파일을 열기 전 기본으로 표시되는 페이지입니다. 위쪽 메뉴에서 Markdown 파일을 열어 주십시오.\n";
+static const char g_sampleMarkdown[] =
+    "# Lilac - Markdown 뷰어\n\n"
+    "이 페이지는 파일을 열기 전 기본으로 표시되는 페이지입니다. 위쪽 메뉴에서 Markdown 파일을 열어 주십시오.\n";
 
 #define LONG_PATH_MAX 32768
 
@@ -35,7 +38,7 @@ typedef struct AppState {
     HWND    hWnd;
     Doc    *doc;
     Layout *layout;
-    wchar_t currentPath[LONG_PATH_MAX];
+    char    currentPath[LONG_PATH_MAX];
     float   baseSize;
     int     darkMode;
     int     scrollY;
@@ -47,7 +50,7 @@ typedef struct AppState {
     HCURSOR hArrowCursor;
     HCURSOR hIBeamCursor;
 
-    /* Text selection */
+    /* Text selection (UTF-8 byte offsets in layout->text) */
     int     selStart;
     int     selEnd;
     int     selAnchor;
@@ -59,8 +62,8 @@ typedef struct AppState {
 static AppState g_app;
 
 #define MAX_RECENT 5
-static wchar_t g_recentFiles[MAX_RECENT][LONG_PATH_MAX];
-static int     g_recentCount = 0;
+static char g_recentFiles[MAX_RECENT][LONG_PATH_MAX];
+static int  g_recentCount = 0;
 
 typedef struct SearchMatch {
     int   toffStart;
@@ -85,6 +88,67 @@ typedef struct SearchState {
 
 static SearchState g_search;
 
+/* ---------------- Win32 Boundary Helpers (UTF-8 <-> UTF-16) ---------------- */
+
+static void win_set_window_text(HWND hWnd, const char *utf8)
+{
+    wchar_t *w = utf8_to_utf16(utf8 ? utf8 : "", -1, NULL);
+    SetWindowTextW(hWnd, w ? w : L"");
+    free(w);
+}
+
+static void win_set_dlg_item_text(HWND hDlg, int id, const char *utf8)
+{
+    wchar_t *w = utf8_to_utf16(utf8 ? utf8 : "", -1, NULL);
+    SetDlgItemTextW(hDlg, id, w ? w : L"");
+    free(w);
+}
+
+static void win_get_dlg_item_text(HWND hDlg, int id, char *out, int outCap)
+{
+    wchar_t wbuf[512] = {0};
+    char *u8;
+    if (!out || outCap <= 0) return;
+    GetDlgItemTextW(hDlg, id, wbuf, 512);
+    u8 = utf16_to_utf8(wbuf, -1, NULL);
+    strncpy_s(out, (size_t)outCap, u8 ? u8 : "", _TRUNCATE);
+    free(u8);
+}
+
+static void win_reg_set_sz(HKEY hKey, const wchar_t *name, const char *utf8)
+{
+    int wlen = 0;
+    wchar_t *w = utf8_to_utf16(utf8 ? utf8 : "", -1, &wlen);
+    if (w) {
+        RegSetValueExW(hKey, name, 0, REG_SZ, (const BYTE *)w, (DWORD)(wlen + 1) * sizeof(wchar_t));
+        free(w);
+    }
+}
+
+static int win_reg_query_sz(HKEY hKey, const wchar_t *name, char *out, int outCap)
+{
+    DWORD bytes = 0;
+    wchar_t *wbuf;
+    char *u8;
+    if (!out || outCap <= 0) return 0;
+    out[0] = 0;
+    if (RegQueryValueExW(hKey, name, NULL, NULL, NULL, &bytes) != ERROR_SUCCESS || bytes == 0) {
+        return 0;
+    }
+    wbuf = (wchar_t *)calloc((bytes / sizeof(wchar_t)) + 2, sizeof(wchar_t));
+    if (!wbuf) return 0;
+    if (RegQueryValueExW(hKey, name, NULL, NULL, (LPBYTE)wbuf, &bytes) != ERROR_SUCCESS) {
+        free(wbuf);
+        return 0;
+    }
+    u8 = utf16_to_utf8(wbuf, -1, NULL);
+    free(wbuf);
+    if (!u8) return 0;
+    strncpy_s(out, (size_t)outCap, u8, _TRUNCATE);
+    free(u8);
+    return out[0] != 0;
+}
+
 /* ---------------- File Association ---------------- */
 
 static int register_file_association(int reg)
@@ -94,7 +158,7 @@ static int register_file_association(int reg)
     HKEY hKey;
 
     GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    swprintf(cmdBuf, MAX_PATH + 32, L"\"%ls\" \"%%1\"", exePath);
+    swprintf_s(cmdBuf, MAX_PATH + 32, L"\"%ls\" \"%%1\"", exePath);
 
     if (reg) {
         /* HKCU\Software\Classes\.md = Lilac.Document */
@@ -115,7 +179,7 @@ static int register_file_association(int reg)
         if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\Lilac.Document\\DefaultIcon", 0, NULL,
                             REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
             wchar_t iconBuf[MAX_PATH + 8];
-            swprintf(iconBuf, MAX_PATH + 8, L"\"%ls\",0", exePath);
+            swprintf_s(iconBuf, MAX_PATH + 8, L"\"%ls\",0", exePath);
             RegSetValueExW(hKey, NULL, 0, REG_SZ, (const BYTE *)iconBuf, (DWORD)(wcslen(iconBuf) + 1) * sizeof(wchar_t));
             RegCloseKey(hKey);
         }
@@ -150,29 +214,19 @@ static void settings_load(void)
     HKEY hKey;
     if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Lilac\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS ||
         RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\MarkView\\Settings", 0, KEY_READ, &hKey) == ERROR_SUCCESS) {
-        wchar_t buf[512] = {0};
-        DWORD sz = sizeof(buf) - sizeof(wchar_t);
+        char buf[1024] = {0};
         DWORD val = 0, valSz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"BodyFontChain", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && (buf[511] = 0, buf[0])) {
+
+        if (win_reg_query_sz(hKey, L"BodyFontChain", buf, sizeof(buf))) {
             font_set_family_chain(FAM_BODY, buf);
-        } else {
-            memset(buf, 0, sizeof(buf));
-            sz = sizeof(buf) - sizeof(wchar_t);
-            if (RegQueryValueExW(hKey, L"BodyFont", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && (buf[511] = 0, buf[0])) {
-                font_set_family_face(FAM_BODY, buf);
-            }
+        } else if (win_reg_query_sz(hKey, L"BodyFont", buf, sizeof(buf))) {
+            font_set_family_face(FAM_BODY, buf);
         }
 
-        memset(buf, 0, sizeof(buf));
-        sz = sizeof(buf) - sizeof(wchar_t);
-        if (RegQueryValueExW(hKey, L"MonoFontChain", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && (buf[511] = 0, buf[0])) {
+        if (win_reg_query_sz(hKey, L"MonoFontChain", buf, sizeof(buf))) {
             font_set_family_chain(FAM_MONO, buf);
-        } else {
-            memset(buf, 0, sizeof(buf));
-            sz = sizeof(buf) - sizeof(wchar_t);
-            if (RegQueryValueExW(hKey, L"MonoFont", NULL, NULL, (LPBYTE)buf, &sz) == ERROR_SUCCESS && (buf[511] = 0, buf[0])) {
-                font_set_family_face(FAM_MONO, buf);
-            }
+        } else if (win_reg_query_sz(hKey, L"MonoFont", buf, sizeof(buf))) {
+            font_set_family_face(FAM_MONO, buf);
         }
 
         /* Recent Files */
@@ -185,11 +239,8 @@ static void settings_load(void)
             for (i = 0; i < count; i++) {
                 wchar_t keyName[32];
                 swprintf_s(keyName, 32, L"RecentFile%d", i);
-                memset(g_recentFiles[g_recentCount], 0, sizeof(g_recentFiles[g_recentCount]));
-                sz = sizeof(g_recentFiles[g_recentCount]) - sizeof(wchar_t);
-                if (RegQueryValueExW(hKey, keyName, NULL, NULL, (LPBYTE)g_recentFiles[g_recentCount], &sz) == ERROR_SUCCESS) {
-                    g_recentFiles[g_recentCount][MAX_PATH - 1] = 0;
-                    if (g_recentFiles[g_recentCount][0]) g_recentCount++;
+                if (win_reg_query_sz(hKey, keyName, g_recentFiles[g_recentCount], LONG_PATH_MAX)) {
+                    g_recentCount++;
                 }
             }
         }
@@ -203,68 +254,59 @@ static void settings_save(void)
     HKEY hKey;
     if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Lilac\\Settings", 0, NULL,
                         REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
-        const wchar_t *b = font_get_family_face(FAM_BODY);
-        const wchar_t *m = font_get_family_face(FAM_MONO);
-        const wchar_t *bChain = font_get_family_chain(FAM_BODY);
-        const wchar_t *mChain = font_get_family_chain(FAM_MONO);
+        const char *b = font_get_family_face(FAM_BODY);
+        const char *m = font_get_family_face(FAM_MONO);
+        const char *bChain = font_get_family_chain(FAM_BODY);
+        const char *mChain = font_get_family_chain(FAM_MONO);
         DWORD rCount = (DWORD)g_recentCount;
         int i;
 
-        RegSetValueExW(hKey, L"BodyFont", 0, REG_SZ, (const BYTE *)b, (DWORD)(wcslen(b) + 1) * sizeof(wchar_t));
-        RegSetValueExW(hKey, L"MonoFont", 0, REG_SZ, (const BYTE *)m, (DWORD)(wcslen(m) + 1) * sizeof(wchar_t));
-        RegSetValueExW(hKey, L"BodyFontChain", 0, REG_SZ, (const BYTE *)bChain, (DWORD)(wcslen(bChain) + 1) * sizeof(wchar_t));
-        RegSetValueExW(hKey, L"MonoFontChain", 0, REG_SZ, (const BYTE *)mChain, (DWORD)(wcslen(mChain) + 1) * sizeof(wchar_t));
+        win_reg_set_sz(hKey, L"BodyFont", b);
+        win_reg_set_sz(hKey, L"MonoFont", m);
+        win_reg_set_sz(hKey, L"BodyFontChain", bChain);
+        win_reg_set_sz(hKey, L"MonoFontChain", mChain);
 
         RegSetValueExW(hKey, L"RecentCount", 0, REG_DWORD, (const BYTE *)&rCount, sizeof(DWORD));
         for (i = 0; i < g_recentCount; i++) {
             wchar_t keyName[32];
             swprintf_s(keyName, 32, L"RecentFile%d", i);
-            RegSetValueExW(hKey, keyName, 0, REG_SZ, (const BYTE *)g_recentFiles[i], (DWORD)(wcslen(g_recentFiles[i]) + 1) * sizeof(wchar_t));
+            win_reg_set_sz(hKey, keyName, g_recentFiles[i]);
         }
 
         RegCloseKey(hKey);
     }
 }
 
-static void recent_add(const wchar_t *path)
+static void recent_add(const char *path)
 {
     int i, found = -1;
-    wchar_t *fullPath = NULL;
-    DWORD fn;
+    char *fullPath;
+    const char *targetPath;
     if (!path || !path[0]) return;
 
-    fn = GetFullPathNameW(path, 0, NULL, NULL);
-    if (fn > 0) {
-        fullPath = (wchar_t *)malloc(fn * sizeof(wchar_t));
-        if (fullPath) {
-            if (GetFullPathNameW(path, fn, fullPath, NULL) == 0) {
-                free(fullPath);
-                fullPath = NULL;
-            }
-        }
-    }
-    const wchar_t *targetPath = fullPath ? fullPath : path;
+    fullPath = path_full(path);
+    targetPath = fullPath ? fullPath : path;
 
     for (i = 0; i < g_recentCount; i++) {
-        if (!_wcsicmp(g_recentFiles[i], targetPath)) {
+        if (!ascii_icmp(g_recentFiles[i], targetPath)) {
             found = i;
             break;
         }
     }
 
     if (found >= 0) {
-        wchar_t *tmp = _wcsdup(g_recentFiles[found]);
+        char *tmp = _strdup(g_recentFiles[found]);
         for (i = found; i > 0; i--) {
-            wcsncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i - 1], _TRUNCATE);
+            strncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i - 1], _TRUNCATE);
         }
-        wcsncpy_s(g_recentFiles[0], LONG_PATH_MAX, tmp ? tmp : targetPath, _TRUNCATE);
+        strncpy_s(g_recentFiles[0], LONG_PATH_MAX, tmp ? tmp : targetPath, _TRUNCATE);
         free(tmp);
     } else {
         int count = g_recentCount < MAX_RECENT ? g_recentCount : MAX_RECENT - 1;
         for (i = count; i > 0; i--) {
-            wcsncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i - 1], _TRUNCATE);
+            strncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i - 1], _TRUNCATE);
         }
-        wcsncpy_s(g_recentFiles[0], LONG_PATH_MAX, targetPath, _TRUNCATE);
+        strncpy_s(g_recentFiles[0], LONG_PATH_MAX, targetPath, _TRUNCATE);
         if (g_recentCount < MAX_RECENT) g_recentCount++;
     }
 
@@ -278,7 +320,7 @@ static void recent_remove(int idx)
     int i;
     if (idx < 0 || idx >= g_recentCount) return;
     for (i = idx; i < g_recentCount - 1; i++) {
-        wcsncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i + 1], _TRUNCATE);
+        strncpy_s(g_recentFiles[i], LONG_PATH_MAX, g_recentFiles[i + 1], _TRUNCATE);
     }
     g_recentCount--;
     settings_save();
@@ -287,12 +329,13 @@ static void recent_remove(int idx)
 
 static void update_recent_menu(void)
 {
+    HMENU hMainMenu, hFileMenu, hRecentMenu;
     if (!g_app.hWnd) return;
-    HMENU hMainMenu = GetMenu(g_app.hWnd);
+    hMainMenu = GetMenu(g_app.hWnd);
     if (!hMainMenu) return;
-    HMENU hFileMenu = GetSubMenu(hMainMenu, 0);
+    hFileMenu = GetSubMenu(hMainMenu, 0);
     if (!hFileMenu) return;
-    HMENU hRecentMenu = GetSubMenu(hFileMenu, 1);
+    hRecentMenu = GetSubMenu(hFileMenu, 1);
     if (!hRecentMenu) return;
 
     while (GetMenuItemCount(hRecentMenu) > 0) {
@@ -304,12 +347,17 @@ static void update_recent_menu(void)
     } else {
         int i;
         for (i = 0; i < g_recentCount; i++) {
-            size_t tlen = wcslen(g_recentFiles[i]) + 32;
-            wchar_t *itemText = (wchar_t *)malloc(tlen * sizeof(wchar_t));
-            if (itemText) {
-                swprintf_s(itemText, tlen, L"&%d. %ls", i + 1, g_recentFiles[i]);
-                AppendMenuW(hRecentMenu, MF_STRING, IDM_RECENT_FILE_1 + i, itemText);
-                free(itemText);
+            size_t ulen = strlen(g_recentFiles[i]) + 32;
+            char *u8Item = (char *)malloc(ulen);
+            if (u8Item) {
+                wchar_t *wItem;
+                snprintf(u8Item, ulen, "&%d. %s", i + 1, g_recentFiles[i]);
+                wItem = utf8_to_utf16(u8Item, -1, NULL);
+                if (wItem) {
+                    AppendMenuW(hRecentMenu, MF_STRING, IDM_RECENT_FILE_1 + i, wItem);
+                    free(wItem);
+                }
+                free(u8Item);
             }
         }
         AppendMenuW(hRecentMenu, MF_SEPARATOR, 0, NULL);
@@ -318,14 +366,22 @@ static void update_recent_menu(void)
     DrawMenuBar(g_app.hWnd);
 }
 
-static int pick_font_face(HWND hWnd, wchar_t *outFace, int outCap, int fixedOnly)
+static int pick_font_face(HWND hWnd, char *outFace, int outCap, int fixedOnly)
 {
     CHOOSEFONTW cf = {0};
     LOGFONTW lf = {0};
-    HDC hdc = GetDC(hWnd);
+    HDC hdc;
+    wchar_t *winit;
+
+    if (!outFace || outCap <= 0) return 0;
+    hdc = GetDC(hWnd);
+    winit = utf8_to_utf16(outFace, -1, NULL);
 
     lf.lfHeight = -16;
-    wcsncpy_s(lf.lfFaceName, LF_FACESIZE, outFace, _TRUNCATE);
+    if (winit) {
+        wcsncpy_s(lf.lfFaceName, LF_FACESIZE, winit, _TRUNCATE);
+        free(winit);
+    }
 
     cf.lStructSize = sizeof(cf);
     cf.hwndOwner = hWnd;
@@ -335,16 +391,17 @@ static int pick_font_face(HWND hWnd, wchar_t *outFace, int outCap, int fixedOnly
     if (fixedOnly) cf.Flags |= CF_FIXEDPITCHONLY;
 
     if (ChooseFontW(&cf)) {
-        wcsncpy_s(outFace, outCap, lf.lfFaceName, _TRUNCATE);
+        char *u8 = utf16_to_utf8(lf.lfFaceName, -1, NULL);
+        if (u8) {
+            strncpy_s(outFace, (size_t)outCap, u8, _TRUNCATE);
+            free(u8);
+        }
         ReleaseDC(hWnd, hdc);
         return 1;
     }
     ReleaseDC(hWnd, hdc);
     return 0;
 }
-
-static wchar_t g_dlgBodyChain[512];
-static wchar_t g_dlgMonoChain[512];
 
 static void rebuild_layout(void);
 
@@ -353,36 +410,34 @@ static INT_PTR CALLBACK FontDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM l
     (void)lParam;
     switch (msg) {
     case WM_INITDIALOG:
-        wcsncpy_s(g_dlgBodyChain, 512, font_get_family_chain(FAM_BODY), _TRUNCATE);
-        wcsncpy_s(g_dlgMonoChain, 512, font_get_family_chain(FAM_MONO), _TRUNCATE);
-        SetDlgItemTextW(hDlg, IDC_EDIT_BODY_CHAIN, g_dlgBodyChain);
-        SetDlgItemTextW(hDlg, IDC_EDIT_MONO_CHAIN, g_dlgMonoChain);
+        win_set_dlg_item_text(hDlg, IDC_EDIT_BODY_CHAIN, font_get_family_chain(FAM_BODY));
+        win_set_dlg_item_text(hDlg, IDC_EDIT_MONO_CHAIN, font_get_family_chain(FAM_MONO));
         return TRUE;
 
     case WM_COMMAND:
         switch (LOWORD(wParam)) {
         case IDC_BTN_CHANGE_BODY: {
-            wchar_t picked[64] = {0};
-            if (pick_font_face(hDlg, picked, 64, 0)) {
-                wchar_t cur[512];
-                GetDlgItemTextW(hDlg, IDC_EDIT_BODY_CHAIN, cur, 512);
-                wchar_t updated[512];
-                _snwprintf_s(updated, 512, _TRUNCATE, L"%ls, %ls", picked, cur);
+            char picked[128] = {0};
+            if (pick_font_face(hDlg, picked, sizeof(picked), 0)) {
+                char cur[512];
+                char updated[640];
+                win_get_dlg_item_text(hDlg, IDC_EDIT_BODY_CHAIN, cur, sizeof(cur));
+                snprintf(updated, sizeof(updated), "%s, %s", picked, cur);
                 font_set_family_chain(FAM_BODY, updated);
-                SetDlgItemTextW(hDlg, IDC_EDIT_BODY_CHAIN, font_get_family_chain(FAM_BODY));
+                win_set_dlg_item_text(hDlg, IDC_EDIT_BODY_CHAIN, font_get_family_chain(FAM_BODY));
             }
             return TRUE;
         }
 
         case IDC_BTN_CHANGE_MONO: {
-            wchar_t picked[64] = {0};
-            if (pick_font_face(hDlg, picked, 64, 1)) {
-                wchar_t cur[512];
-                GetDlgItemTextW(hDlg, IDC_EDIT_MONO_CHAIN, cur, 512);
-                wchar_t updated[512];
-                _snwprintf_s(updated, 512, _TRUNCATE, L"%ls, %ls", picked, cur);
+            char picked[128] = {0};
+            if (pick_font_face(hDlg, picked, sizeof(picked), 1)) {
+                char cur[512];
+                char updated[640];
+                win_get_dlg_item_text(hDlg, IDC_EDIT_MONO_CHAIN, cur, sizeof(cur));
+                snprintf(updated, sizeof(updated), "%s, %s", picked, cur);
                 font_set_family_chain(FAM_MONO, updated);
-                SetDlgItemTextW(hDlg, IDC_EDIT_MONO_CHAIN, font_get_family_chain(FAM_MONO));
+                win_set_dlg_item_text(hDlg, IDC_EDIT_MONO_CHAIN, font_get_family_chain(FAM_MONO));
             }
             return TRUE;
         }
@@ -390,16 +445,16 @@ static INT_PTR CALLBACK FontDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM l
         case IDC_BTN_RESET: {
             font_set_family_chain(FAM_BODY, NULL);
             font_set_family_chain(FAM_MONO, NULL);
-            SetDlgItemTextW(hDlg, IDC_EDIT_BODY_CHAIN, font_get_family_chain(FAM_BODY));
-            SetDlgItemTextW(hDlg, IDC_EDIT_MONO_CHAIN, font_get_family_chain(FAM_MONO));
+            win_set_dlg_item_text(hDlg, IDC_EDIT_BODY_CHAIN, font_get_family_chain(FAM_BODY));
+            win_set_dlg_item_text(hDlg, IDC_EDIT_MONO_CHAIN, font_get_family_chain(FAM_MONO));
             return TRUE;
         }
 
         case IDOK: {
-            wchar_t bChain[512];
-            wchar_t mChain[512];
-            GetDlgItemTextW(hDlg, IDC_EDIT_BODY_CHAIN, bChain, 512);
-            GetDlgItemTextW(hDlg, IDC_EDIT_MONO_CHAIN, mChain, 512);
+            char bChain[512];
+            char mChain[512];
+            win_get_dlg_item_text(hDlg, IDC_EDIT_BODY_CHAIN, bChain, sizeof(bChain));
+            win_get_dlg_item_text(hDlg, IDC_EDIT_MONO_CHAIN, mChain, sizeof(mChain));
             font_set_family_chain(FAM_BODY, bChain);
             font_set_family_chain(FAM_MONO, mChain);
             settings_save();
@@ -421,18 +476,19 @@ static INT_PTR CALLBACK FontDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM l
 
 static void do_scroll(int newPos);
 
-static int is_word_char(wchar_t c)
+static int is_word_cp(uint32_t cp)
 {
-    if (c <= 32) return 0;
-    if (wcschr(L" \t\r\n.,()[]{}<>\"';:!?`~|/\\=+-*&^%$#@", c)) return 0;
+    if (cp <= 32) return 0;
+    if (cp < 128 && strchr(" \t\r\n.,()[]{}<>\"';:!?`~|/\\=+-*&^%$#@", (int)cp)) return 0;
     return 1;
 }
 
 static void copy_selection_to_clipboard(void)
 {
-    int s, e, len, i, extra = 0;
+    int s, e, len, i, extra = 0, wlen = 0;
+    char *norm;
+    wchar_t *wtext;
     HGLOBAL hMem;
-    wchar_t *dst;
 
     if (!g_app.layout || !g_app.layout->text) return;
     s = min(g_app.selStart, g_app.selEnd);
@@ -442,52 +498,88 @@ static void copy_selection_to_clipboard(void)
     len = e - s;
     if (len <= 0) return;
 
-    /* Count lone \n to convert to \r\n */
+    /* Count lone \n to convert to \r\n in UTF-8 buffer */
     for (i = 0; i < len; i++) {
-        if (g_app.layout->text[s + i] == L'\n') {
-            if (i == 0 || g_app.layout->text[s + i - 1] != L'\r') {
+        if (g_app.layout->text[s + i] == '\n') {
+            if (i == 0 || g_app.layout->text[s + i - 1] != '\r') {
                 extra++;
             }
         }
     }
 
-    if (!OpenClipboard(g_app.hWnd)) return;
+    if (len > 0x3FFFFFFF || extra < 0 || extra > 0x3FFFFFFF) return;
+    norm = (char *)malloc((size_t)len + (size_t)extra + 1);
+    if (!norm) return;
+    {
+        int outIdx = 0;
+        int cap = len + extra;
+        for (i = 0; i < len && outIdx < cap; i++) {
+            char c = g_app.layout->text[s + i];
+            if (c == '\n' && (i == 0 || g_app.layout->text[s + i - 1] != '\r') && outIdx + 1 < cap) {
+                norm[outIdx++] = '\r';
+            }
+            norm[outIdx++] = c;
+        }
+        norm[outIdx] = 0;
+        wtext = utf8_to_utf16(norm, outIdx, &wlen);
+    }
+    free(norm);
+    if (!wtext) return;
+
+    if (!OpenClipboard(g_app.hWnd)) {
+        free(wtext);
+        return;
+    }
     EmptyClipboard();
 
-    hMem = GlobalAlloc(GMEM_MOVEABLE, (size_t)(len + extra + 1) * sizeof(wchar_t));
+    hMem = GlobalAlloc(GMEM_MOVEABLE, (size_t)(wlen + 1) * sizeof(wchar_t));
     if (hMem) {
-        dst = (wchar_t *)GlobalLock(hMem);
+        wchar_t *dst = (wchar_t *)GlobalLock(hMem);
         if (dst) {
-            int outIdx = 0;
-            for (i = 0; i < len; i++) {
-                wchar_t c = g_app.layout->text[s + i];
-                if (c == L'\n' && (i == 0 || g_app.layout->text[s + i - 1] != L'\r')) {
-                    dst[outIdx++] = L'\r';
-                }
-                dst[outIdx++] = c;
-            }
-            dst[outIdx] = 0;
+            memcpy(dst, wtext, (size_t)(wlen + 1) * sizeof(wchar_t));
             GlobalUnlock(hMem);
             SetClipboardData(CF_UNICODETEXT, hMem);
         }
     }
     CloseClipboard();
+    free(wtext);
+}
+
+static uint32_t fold_cp(uint32_t cp)
+{
+    if (cp >= 'A' && cp <= 'Z') return cp + 32;
+    return cp;
+}
+
+static int utf8_match_here(const char *hay, int hayLen, const char *needle, int needleLen)
+{
+    int hi = 0, ni = 0;
+    while (ni < needleLen) {
+        uint32_t hc, nc;
+        if (hi >= hayLen) return -1;
+        hc = fold_cp(utf8_next(hay, hayLen, &hi));
+        nc = fold_cp(utf8_next(needle, needleLen, &ni));
+        if (hc != nc) return -1;
+    }
+    return hi;
 }
 
 static void search_perform(void)
 {
-    wchar_t q[128];
-    int qlen;
+    wchar_t wq[256] = {0};
+    char *q = NULL;
+    int qlen = 0;
     int i;
     if (!g_search.hEdit) return;
-    GetWindowTextW(g_search.hEdit, q, 128);
-    qlen = (int)wcslen(q);
+    GetWindowTextW(g_search.hEdit, wq, 256);
+    q = utf16_to_utf8(wq, -1, &qlen);
 
-    if (qlen == 0 || !g_app.layout || !g_app.layout->text || g_app.layout->textlen == 0) {
+    if (!q || qlen == 0 || !g_app.layout || !g_app.layout->text || g_app.layout->textlen == 0) {
+        free(q);
         g_search.matchCount = 0;
         g_search.currentIndex = -1;
         if (g_search.hStaticCount) {
-            SetWindowTextW(g_search.hStaticCount, L"");
+            win_set_window_text(g_search.hStaticCount, "");
             InvalidateRect(g_search.hStaticCount, NULL, TRUE);
         }
         InvalidateRect(g_app.hWnd, NULL, FALSE);
@@ -495,23 +587,34 @@ static void search_perform(void)
     }
 
     g_search.matchCount = 0;
-    for (i = 0; i <= g_app.layout->textlen - qlen; i++) {
-        if (_wcsnicmp(g_app.layout->text + i, q, qlen) == 0) {
+    i = 0;
+    while (i <= g_app.layout->textlen - qlen) {
+        int matchedBytes = utf8_match_here(g_app.layout->text + i, g_app.layout->textlen - i, q, qlen);
+        if (matchedBytes > 0) {
+            float my = 0;
             if (g_search.matchCount >= g_search.matchCap) {
-                g_search.matchCap = g_search.matchCap ? g_search.matchCap * 2 : 64;
-                g_search.matches = (SearchMatch *)realloc(g_search.matches, g_search.matchCap * sizeof(SearchMatch));
+                int newCap = g_search.matchCap > 0 ? g_search.matchCap * 2 : 64;
+                SearchMatch *nm;
+                if (g_search.matchCap > 0x3FFFFFFF || (size_t)newCap > SIZE_MAX / sizeof(SearchMatch)) break;
+                nm = (SearchMatch *)realloc(g_search.matches, (size_t)newCap * sizeof(SearchMatch));
+                if (!nm) break;
+                g_search.matches = nm;
+                g_search.matchCap = newCap;
             }
             g_search.matches[g_search.matchCount].toffStart = i;
-            g_search.matches[g_search.matchCount].toffEnd = i + qlen;
-            float my = 0;
+            g_search.matches[g_search.matchCount].toffEnd = i + matchedBytes;
             layout_text_pos(g_app.layout, i, NULL, NULL, &my);
             g_search.matches[g_search.matchCount].y = my;
             g_search.matchCount++;
         }
+        /* Advance to next UTF-8 codepoint boundary */
+        (void)utf8_next(g_app.layout->text, g_app.layout->textlen, &i);
     }
+    free(q);
 
     if (g_search.matchCount > 0) {
         int best = 0;
+        char countBuf[32];
         for (i = 0; i < g_search.matchCount; i++) {
             if (g_search.matches[i].y >= (float)g_app.scrollY) {
                 best = i;
@@ -520,14 +623,13 @@ static void search_perform(void)
         }
         g_search.currentIndex = best;
         do_scroll((int)g_search.matches[best].y - g_app.clientH / 3);
-        wchar_t countBuf[32];
-        swprintf_s(countBuf, 32, L"%d / %d", best + 1, g_search.matchCount);
-        SetWindowTextW(g_search.hStaticCount, countBuf);
+        snprintf(countBuf, sizeof(countBuf), "%d / %d", best + 1, g_search.matchCount);
+        win_set_window_text(g_search.hStaticCount, countBuf);
         InvalidateRect(g_search.hStaticCount, NULL, TRUE);
         UpdateWindow(g_search.hStaticCount);
     } else {
         g_search.currentIndex = -1;
-        SetWindowTextW(g_search.hStaticCount, L"결과 없음");
+        win_set_window_text(g_search.hStaticCount, "결과 없음");
         InvalidateRect(g_search.hStaticCount, NULL, TRUE);
         UpdateWindow(g_search.hStaticCount);
     }
@@ -537,11 +639,11 @@ static void search_perform(void)
 static void search_next(void)
 {
     if (g_search.matchCount > 0) {
+        char countBuf[32];
         g_search.currentIndex = (g_search.currentIndex + 1) % g_search.matchCount;
         do_scroll((int)g_search.matches[g_search.currentIndex].y - g_app.clientH / 3);
-        wchar_t countBuf[32];
-        swprintf_s(countBuf, 32, L"%d / %d", g_search.currentIndex + 1, g_search.matchCount);
-        SetWindowTextW(g_search.hStaticCount, countBuf);
+        snprintf(countBuf, sizeof(countBuf), "%d / %d", g_search.currentIndex + 1, g_search.matchCount);
+        win_set_window_text(g_search.hStaticCount, countBuf);
         InvalidateRect(g_search.hStaticCount, NULL, TRUE);
         UpdateWindow(g_search.hStaticCount);
         InvalidateRect(g_app.hWnd, NULL, FALSE);
@@ -551,11 +653,11 @@ static void search_next(void)
 static void search_prev(void)
 {
     if (g_search.matchCount > 0) {
+        char countBuf[32];
         g_search.currentIndex = (g_search.currentIndex - 1 + g_search.matchCount) % g_search.matchCount;
         do_scroll((int)g_search.matches[g_search.currentIndex].y - g_app.clientH / 3);
-        wchar_t countBuf[32];
-        swprintf_s(countBuf, 32, L"%d / %d", g_search.currentIndex + 1, g_search.matchCount);
-        SetWindowTextW(g_search.hStaticCount, countBuf);
+        snprintf(countBuf, sizeof(countBuf), "%d / %d", g_search.currentIndex + 1, g_search.matchCount);
+        win_set_window_text(g_search.hStaticCount, countBuf);
         InvalidateRect(g_search.hStaticCount, NULL, TRUE);
         UpdateWindow(g_search.hStaticCount);
         InvalidateRect(g_app.hWnd, NULL, FALSE);
@@ -568,8 +670,8 @@ static void search_open(void)
 {
     g_search.active = 1;
     if (g_search.hPanel) {
-        search_update_font();
         int px = g_app.clientW - 365;
+        search_update_font();
         if (px < 10) px = 10;
         SetWindowPos(g_search.hPanel, HWND_TOP, px, 10, 350, 36, SWP_SHOWWINDOW);
         ShowWindow(g_search.hPanel, SW_SHOW);
@@ -646,13 +748,14 @@ static LRESULT CALLBACK SearchPanelProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
         RECT r;
-        GetClientRect(hWnd, &r);
         COLORREF bg = g_app.darkMode ? RGB(34, 39, 46) : RGB(255, 255, 255);
         COLORREF border = g_app.darkMode ? RGB(68, 76, 86) : RGB(208, 215, 222);
         HBRUSH br = CreateSolidBrush(bg);
         HPEN pen = CreatePen(PS_SOLID, 1, border);
-        HGDIOBJ oldP = SelectObject(hdc, pen);
-        HGDIOBJ oldB = SelectObject(hdc, br);
+        HGDIOBJ oldP, oldB;
+        GetClientRect(hWnd, &r);
+        oldP = SelectObject(hdc, pen);
+        oldB = SelectObject(hdc, br);
         RoundRect(hdc, r.left, r.top, r.right, r.bottom, 8, 8);
         SelectObject(hdc, oldB);
         SelectObject(hdc, oldP);
@@ -701,28 +804,31 @@ static LRESULT CALLBACK SearchPanelProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
         COLORREF fg = g_app.darkMode ? RGB(220, 230, 242) : RGB(36, 41, 47);
         COLORREF border = g_app.darkMode ? RGB(70, 80, 92) : RGB(208, 215, 222);
         const wchar_t *text = L"";
+        HBRUSH br;
+        HPEN pen;
+        HGDIOBJ oldB, oldP, oldF;
 
         if (dis->itemState & ODS_SELECTED) {
             bg = g_app.darkMode ? RGB(65, 75, 88) : RGB(220, 225, 232);
         }
 
-        HBRUSH br = CreateSolidBrush(bg);
-        HPEN pen = CreatePen(PS_SOLID, 1, border);
-        HGDIOBJ oldB = SelectObject(dis->hDC, br);
-        HGDIOBJ oldP = SelectObject(dis->hDC, pen);
+        br = CreateSolidBrush(bg);
+        pen = CreatePen(PS_SOLID, 1, border);
+        oldB = SelectObject(dis->hDC, br);
+        oldP = SelectObject(dis->hDC, pen);
         RoundRect(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom, 4, 4);
         SelectObject(dis->hDC, oldP);
         SelectObject(dis->hDC, oldB);
         DeleteObject(pen);
         DeleteObject(br);
 
-        if (dis->CtlID == IDC_SEARCH_PREV) text = L"▲";
-        else if (dis->CtlID == IDC_SEARCH_NEXT) text = L"▼";
-        else if (dis->CtlID == IDC_SEARCH_CLOSE) text = L"✕";
+        if (dis->CtlID == IDC_SEARCH_PREV) text = L"\x25B2";
+        else if (dis->CtlID == IDC_SEARCH_NEXT) text = L"\x25BC";
+        else if (dis->CtlID == IDC_SEARCH_CLOSE) text = L"\x2715";
 
         SetTextColor(dis->hDC, fg);
         SetBkMode(dis->hDC, TRANSPARENT);
-        HGDIOBJ oldF = SelectObject(dis->hDC, g_search.hFont);
+        oldF = SelectObject(dis->hDC, g_search.hFont);
         DrawTextW(dis->hDC, text, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         SelectObject(dis->hDC, oldF);
         return TRUE;
@@ -753,26 +859,32 @@ static LRESULT CALLBACK SearchPanelProc(HWND hWnd, UINT msg, WPARAM wParam, LPAR
 static void search_update_font(void)
 {
     Font *primary = font_primary(FAM_BODY, 0, 0);
-    const wchar_t *face = (primary && primary->face[0]) ? primary->face : font_get_family_face(FAM_BODY);
-    if (!face || !face[0]) face = L"맑은 고딕";
-
+    const char *face = (primary && primary->face[0]) ? primary->face : font_get_family_face(FAM_BODY);
+    wchar_t *wface;
     UINT dpi = 96;
+    int fontHeight;
     typedef UINT (WINAPI *GetDpiForWindowProc)(HWND);
     HMODULE hUser = GetModuleHandleW(L"user32.dll");
+
+    if (!face || !face[0]) face = "맑은 고딕";
     if (hUser) {
         GetDpiForWindowProc pGetDpi = (GetDpiForWindowProc)GetProcAddress(hUser, "GetDpiForWindow");
         if (pGetDpi && g_app.hWnd) dpi = pGetDpi(g_app.hWnd);
     }
-    int fontHeight = -MulDiv(10, dpi, 72);
+    fontHeight = -MulDiv(10, dpi, 72);
 
     if (g_search.hFont) {
         DeleteObject(g_search.hFont);
         g_search.hFont = NULL;
     }
 
+    wface = utf8_to_utf16(face, -1, NULL);
     g_search.hFont = CreateFontW(fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, face);
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE,
+                                 wface ? wface : L"맑은 고딕");
+    free(wface);
+
     if (!g_search.hFont) {
         g_search.hFont = CreateFontW(fontHeight, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -823,19 +935,19 @@ static void search_init(HWND hParent, HINSTANCE hInst)
         g_search.hPanel, (HMENU)IDC_SEARCH_STATIC, hInst, NULL);
 
     g_search.hBtnPrev = CreateWindowExW(
-        0, L"BUTTON", L"▲",
+        0, L"BUTTON", L"\x25B2",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
         270, 6, 24, 24,
         g_search.hPanel, (HMENU)IDC_SEARCH_PREV, hInst, NULL);
 
     g_search.hBtnNext = CreateWindowExW(
-        0, L"BUTTON", L"▼",
+        0, L"BUTTON", L"\x25BC",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
         296, 6, 24, 24,
         g_search.hPanel, (HMENU)IDC_SEARCH_NEXT, hInst, NULL);
 
     g_search.hBtnClose = CreateWindowExW(
-        0, L"BUTTON", L"✕",
+        0, L"BUTTON", L"\x2715",
         WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | BS_OWNERDRAW,
         322, 6, 24, 24,
         g_search.hPanel, (HMENU)IDC_SEARCH_CLOSE, hInst, NULL);
@@ -847,13 +959,13 @@ static void search_init(HWND hParent, HINSTANCE hInst)
 
 static void update_window_title(void)
 {
-    wchar_t title[512];
+    char title[1024];
     if (g_app.currentPath[0]) {
-        swprintf(title, 512, L"%ls - Lilac", path_name(g_app.currentPath));
+        snprintf(title, sizeof(title), "%s - Lilac", path_name(g_app.currentPath));
     } else {
-        swprintf(title, 512, L"%ls - Lilac", g_app.doc && g_app.doc->title ? g_app.doc->title : L"Lilac");
+        snprintf(title, sizeof(title), "%s - Lilac", g_app.doc && g_app.doc->title ? g_app.doc->title : "Lilac");
     }
-    SetWindowTextW(g_app.hWnd, title);
+    win_set_window_text(g_app.hWnd, title);
 }
 
 static void rebuild_layout(void)
@@ -908,16 +1020,19 @@ static void rebuild_layout(void)
     InvalidateRect(g_app.hWnd, NULL, FALSE);
 }
 
-static void open_file(const wchar_t *path)
+static void open_file(const char *path)
 {
     Doc *newDoc = doc_load_file(path);
     if (!newDoc) {
-        size_t mlen = wcslen(path) + 128;
-        wchar_t *msg = (wchar_t *)malloc(mlen * sizeof(wchar_t));
-        if (msg) {
-            swprintf(msg, mlen, L"파일을 열 수 없습니다:\n%ls", path);
-            MessageBoxW(g_app.hWnd, msg, L"오류", MB_OK | MB_ICONERROR);
-            free(msg);
+        size_t mlen = strlen(path) + 128;
+        char *u8Msg = (char *)malloc(mlen);
+        if (u8Msg) {
+            wchar_t *wMsg;
+            snprintf(u8Msg, mlen, "파일을 열 수 없습니다:\n%s", path);
+            wMsg = utf8_to_utf16(u8Msg, -1, NULL);
+            MessageBoxW(g_app.hWnd, wMsg ? wMsg : L"파일을 열 수 없습니다.", L"오류", MB_OK | MB_ICONERROR);
+            free(wMsg);
+            free(u8Msg);
         } else {
             MessageBoxW(g_app.hWnd, L"파일을 열 수 없습니다.", L"오류", MB_OK | MB_ICONERROR);
         }
@@ -926,7 +1041,7 @@ static void open_file(const wchar_t *path)
 
     if (g_app.doc) doc_free(g_app.doc);
     g_app.doc = newDoc;
-    wcsncpy_s(g_app.currentPath, LONG_PATH_MAX, path, _TRUNCATE);
+    strncpy_s(g_app.currentPath, LONG_PATH_MAX, path, _TRUNCATE);
     doc_resolve_images(g_app.doc, 0);
 
     recent_add(path);
@@ -941,10 +1056,8 @@ static void open_file(const wchar_t *path)
 
 static void load_sample_content(void)
 {
-    char *utf8 = utf16_to_utf8(g_sampleMarkdown, -1, NULL);
     if (g_app.doc) doc_free(g_app.doc);
-    g_app.doc = doc_parse(utf8, strlen(utf8), NULL);
-    free(utf8);
+    g_app.doc = doc_parse(g_sampleMarkdown, strlen(g_sampleMarkdown), NULL);
     g_app.currentPath[0] = 0;
     g_app.selStart = -1;
     g_app.selEnd = -1;
@@ -973,9 +1086,17 @@ static void render_display_list(HDC hdc, Layout *L, int scrollY, int clientW, in
         for (i = 0; i < L->nitems; i++) {
             const Item *it = &L->items[i];
             float drawY = it->y - (float)scrollY;
+            float itemTop, itemBot;
 
             if (it->layer != layer) continue;
-            if (drawY + it->h < 0 || drawY > (float)clientH + 100.0f) continue;
+            if (it->type == IT_GLYPHS) {
+                itemTop = drawY - it->size * 1.25f;
+                itemBot = drawY + it->size * 0.65f;
+            } else {
+                itemTop = min(drawY, drawY + it->h) - it->lw;
+                itemBot = max(drawY, drawY + it->h) + it->lw;
+            }
+            if (itemBot < -50.0f || itemTop > (float)clientH + 100.0f) continue;
 
             switch (it->type) {
             case IT_FILL: {
@@ -1030,8 +1151,11 @@ static void render_display_list(HDC hdc, Layout *L, int scrollY, int clientW, in
                 HPEN nullPen = (HPEN)GetStockObject(NULL_PEN);
                 HGDIOBJ oldP = SelectObject(hdc, nullPen);
                 HGDIOBJ oldB = SelectObject(hdc, br);
-                Ellipse(hdc, (int)round(it->x), (int)round(drawY),
-                        (int)round(it->x + it->w), (int)round(drawY + it->h));
+                int ix = (int)round(it->x);
+                int iy = (int)round(drawY);
+                int iw = max(2, (int)round(it->w));
+                int ih = max(2, (int)round(it->h));
+                Ellipse(hdc, ix, iy, ix + iw, iy + ih);
                 SelectObject(hdc, oldB);
                 SelectObject(hdc, oldP);
                 DeleteObject(br);
@@ -1081,30 +1205,35 @@ static void render_display_list(HDC hdc, Layout *L, int scrollY, int clientW, in
                     COLORREF col = RGB((it->color >> 16) & 0xFF, (it->color >> 8) & 0xFF, it->color & 0xFF);
                     HGDIOBJ oldF;
                     int stackDx[256];
-                    int *dx = (it->n <= 256) ? stackDx : (int *)malloc(it->n * sizeof(int));
+                    int *dx = (it->n <= 256) ? stackDx : (int *)malloc((size_t)it->n * sizeof(int));
                     int g;
+                    float asc, dsc;
+                    int topY, botY;
 
-                    if (!hf) continue;
+                    if (!hf) {
+                        if (dx && dx != stackDx) free(dx);
+                        continue;
+                    }
 
                     /* Calculate vertical bounding box for highlights */
-                    float asc = (it->font && it->font->upem > 0)
+                    asc = (it->font && it->font->upem > 0)
                         ? ((float)it->font->ascent * it->size / (float)it->font->upem)
                         : (it->size * 0.85f);
-                    float dsc = (it->font && it->font->upem > 0)
+                    dsc = (it->font && it->font->upem > 0)
                         ? ((float)it->font->descent * it->size / (float)it->font->upem)
                         : (it->size * 0.25f);
-                    int topY = (int)round(drawY - asc - 1.0f);
-                    int botY = (int)round(drawY + dsc + 1.0f);
+                    topY = (int)round(drawY - asc - 1.0f);
+                    botY = (int)round(drawY + dsc + 1.0f);
 
                     /* 1. Search match highlights */
                     if (g_search.active && g_search.matchCount > 0 && it->toff) {
                         int m;
                         for (m = 0; m < g_search.matchCount; m++) {
                             SearchMatch *sm = &g_search.matches[m];
+                            float mx1 = -1.0f, mx2 = -1.0f;
                             if (sm->toffEnd <= it->toff[0]) continue;
                             if (sm->toffStart >= it->tend) break;
 
-                            float mx1 = -1.0f, mx2 = -1.0f;
                             for (g = 0; g < it->n; g++) {
                                 if (it->toff[g] >= sm->toffStart && it->toff[g] < sm->toffEnd) {
                                     float gx1 = it->x + (it->dx ? it->dx[g] : 0);
@@ -1214,10 +1343,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
     switch (msg) {
     case WM_CREATE: {
         HINSTANCE hInst = ((LPCREATESTRUCTW)lParam)->hInstance;
+        HICON hIcon, hIconSm;
         g_app.hWnd = hWnd;
-        HICON hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APPICON));
-        HICON hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
-                                         GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+        hIcon = LoadIconW(hInst, MAKEINTRESOURCEW(IDI_APPICON));
+        hIconSm = (HICON)LoadImageW(hInst, MAKEINTRESOURCEW(IDI_APPICON), IMAGE_ICON,
+                                    GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
         if (hIcon) SendMessageW(hWnd, WM_SETICON, ICON_BIG, (LPARAM)hIcon);
         if (hIconSm) SendMessageW(hWnd, WM_SETICON, ICON_SMALL, (LPARAM)hIconSm);
         DragAcceptFiles(hWnd, TRUE);
@@ -1289,8 +1419,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         int cy = GET_Y_LPARAM(lParam);
         int docX = cx;
         int docY = cy + g_app.scrollY;
+        int link = -1, overTxt;
 
         if (g_app.isSelecting) {
+            int hit;
             /* Auto-scroll when dragging outside client area */
             if (cy < 0) {
                 do_scroll(g_app.scrollY + cy);
@@ -1298,7 +1430,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
                 do_scroll(g_app.scrollY + (cy - g_app.clientH));
             }
 
-            int hit = layout_hit_text(g_app.layout, 0, (float)docX, (float)(cy + g_app.scrollY));
+            hit = layout_hit_text(g_app.layout, 0, (float)docX, (float)(cy + g_app.scrollY));
             if (hit >= 0 && g_app.selAnchor >= 0) {
                 if (hit != g_app.selEnd) {
                     g_app.selStart = g_app.selAnchor;
@@ -1310,11 +1442,10 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
-        int link = -1;
         if (g_app.layout) {
             link = layout_hit_link(g_app.layout, 0, (float)docX, (float)docY);
         }
-        int overTxt = is_over_text((float)docX, (float)docY);
+        overTxt = is_over_text((float)docX, (float)docY);
 
         if (link != g_app.hoverLink || overTxt != g_app.hoverText) {
             g_app.hoverLink = link;
@@ -1349,6 +1480,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         int x = GET_X_LPARAM(lParam);
         int y = GET_Y_LPARAM(lParam) + g_app.scrollY;
         int link = -1;
+        int hit;
         if (g_app.layout) {
             link = layout_hit_link(g_app.layout, 0, (float)x, (float)y);
         }
@@ -1356,7 +1488,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_app.downPt.x = GET_X_LPARAM(lParam);
         g_app.downPt.y = GET_Y_LPARAM(lParam);
 
-        int hit = layout_hit_text(g_app.layout, 0, (float)x, (float)y);
+        hit = layout_hit_text(g_app.layout, 0, (float)x, (float)y);
         if (hit >= 0) {
             if (!(GetKeyState(VK_SHIFT) & 0x8000)) {
                 g_app.selAnchor = hit;
@@ -1378,26 +1510,30 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_LBUTTONUP: {
         if (g_app.isSelecting) {
+            int dx, dy;
             ReleaseCapture();
             g_app.isSelecting = 0;
 
-            int dx = abs(GET_X_LPARAM(lParam) - g_app.downPt.x);
-            int dy = abs(GET_Y_LPARAM(lParam) - g_app.downPt.y);
+            dx = abs(GET_X_LPARAM(lParam) - g_app.downPt.x);
+            dy = abs(GET_Y_LPARAM(lParam) - g_app.downPt.y);
 
             /* If it was a click without dragging */
             if (dx < 4 && dy < 4) {
                 if (g_app.pendingLink >= 0 && g_app.pendingLink < g_app.doc->nlinks) {
-                    const wchar_t *target = g_app.doc->links[g_app.pendingLink];
+                    const char *target = g_app.doc->links[g_app.pendingLink];
                     if (target[0] == '#') {
                         const Anchor *anc = layout_find_anchor(g_app.layout, target + 1);
                         if (anc) do_scroll((int)anc->y - 20);
                     } else if (link_is_safe_external(target)) {
-                        ShellExecuteW(hWnd, L"open", target, NULL, NULL, SW_SHOWNORMAL);
+                        wchar_t *wtarget = utf8_to_utf16(target, -1, NULL);
+                        if (wtarget) {
+                            ShellExecuteW(hWnd, L"open", wtarget, NULL, NULL, SW_SHOWNORMAL);
+                            free(wtarget);
+                        }
                     } else if (g_app.doc->dir && !path_is_remote(target) &&
-                               !wcschr(target, L':') && target[0] != L'\\' && target[0] != L'/') {
-                        wchar_t *joined = path_join(g_app.doc->dir, target);
-                        if (joined && !path_is_remote(joined) &&
-                            GetFileAttributesW(joined) != INVALID_FILE_ATTRIBUTES) {
+                               !strchr(target, ':') && target[0] != '\\' && target[0] != '/') {
+                        char *joined = path_join(g_app.doc->dir, target);
+                        if (joined && !path_is_remote(joined) && path_is_within(joined, g_app.doc->dir) && file_exists(joined)) {
                             open_file(joined);
                         }
                         free(joined);
@@ -1430,16 +1566,34 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         int y = GET_Y_LPARAM(lParam) + g_app.scrollY;
         int hit = layout_hit_text(g_app.layout, 0, (float)x, (float)y);
         if (hit >= 0 && g_app.layout && g_app.layout->text && g_app.layout->textlen > 0) {
-            const wchar_t *txt = g_app.layout->text;
+            const char *txt = g_app.layout->text;
             int len = g_app.layout->textlen;
+            int s, e, tmp;
+            uint32_t hitCp;
             if (hit >= len) hit = len - 1;
-            int s = hit, e = hit;
-            if (is_word_char(txt[hit])) {
-                while (s > 0 && is_word_char(txt[s - 1])) s--;
-                while (e < len && is_word_char(txt[e])) e++;
-            } else {
-                while (s > 0 && !is_word_char(txt[s - 1]) && txt[s - 1] != L'\n') s--;
-                while (e < len && !is_word_char(txt[e]) && txt[e] != L'\n') e++;
+            /* Align hit to start of UTF-8 codepoint */
+            while (hit > 0 && (((unsigned char)txt[hit] & 0xC0) == 0x80)) hit--;
+            tmp = hit;
+            hitCp = utf8_next(txt, len, &tmp);
+            s = hit;
+            e = tmp;
+            if (is_word_cp(hitCp)) {
+                while (s > 0) {
+                    int prev = s - 1;
+                    int p2;
+                    uint32_t cp;
+                    while (prev > 0 && (((unsigned char)txt[prev] & 0xC0) == 0x80)) prev--;
+                    p2 = prev;
+                    cp = utf8_next(txt, len, &p2);
+                    if (!is_word_cp(cp)) break;
+                    s = prev;
+                }
+                while (e < len) {
+                    int next = e;
+                    uint32_t cp = utf8_next(txt, len, &next);
+                    if (!is_word_cp(cp)) break;
+                    e = next;
+                }
             }
             g_app.selStart = s;
             g_app.selEnd = e;
@@ -1451,6 +1605,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_CONTEXTMENU: {
         POINT pt;
+        HMENU hMenu;
+        int hasSel;
         pt.x = GET_X_LPARAM(lParam);
         pt.y = GET_Y_LPARAM(lParam);
         if (pt.x == -1 && pt.y == -1) {
@@ -1458,8 +1614,8 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             pt.y = 50;
             ClientToScreen(hWnd, &pt);
         }
-        HMENU hMenu = CreatePopupMenu();
-        int hasSel = (g_app.selStart >= 0 && g_app.selEnd >= 0 && g_app.selStart != g_app.selEnd);
+        hMenu = CreatePopupMenu();
+        hasSel = (g_app.selStart >= 0 && g_app.selEnd >= 0 && g_app.selStart != g_app.selEnd);
         AppendMenuW(hMenu, MF_STRING | (hasSel ? 0 : MF_GRAYED), IDM_EDIT_COPY, L"복사(&C)\tCtrl+C");
         AppendMenuW(hMenu, MF_STRING, IDM_EDIT_SELECT_ALL, L"모두 선택(&A)\tCtrl+A");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, NULL);
@@ -1477,7 +1633,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             wchar_t *dropped = (wchar_t *)malloc((len + 1) * sizeof(wchar_t));
             if (dropped) {
                 if (DragQueryFileW(hDrop, 0, dropped, len + 1)) {
-                    open_file(dropped);
+                    char *u8Path = utf16_to_utf8(dropped, -1, NULL);
+                    if (u8Path) {
+                        open_file(u8Path);
+                        free(u8Path);
+                    }
                 }
                 free(dropped);
             }
@@ -1499,7 +1659,11 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             ofn.nMaxFile = LONG_PATH_MAX;
             ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
             if (GetOpenFileNameW(&ofn)) {
-                open_file(fileBuf);
+                char *u8Path = utf16_to_utf8(fileBuf, -1, NULL);
+                if (u8Path) {
+                    open_file(u8Path);
+                    free(u8Path);
+                }
             }
             free(fileBuf);
             return 0;
@@ -1513,15 +1677,20 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_RECENT_FILE_5: {
             int idx = LOWORD(wParam) - IDM_RECENT_FILE_1;
             if (idx >= 0 && idx < g_recentCount) {
-                if (GetFileAttributesW(g_recentFiles[idx]) != INVALID_FILE_ATTRIBUTES) {
+                if (file_exists(g_recentFiles[idx])) {
                     open_file(g_recentFiles[idx]);
                 } else {
-                    size_t mlen = wcslen(g_recentFiles[idx]) + 128;
-                    wchar_t *msg = (wchar_t *)malloc(mlen * sizeof(wchar_t));
-                    if (msg) {
-                        swprintf(msg, mlen, L"파일을 찾을 수 없습니다:\n%ls\n\n최근 파일 목록에서 제거합니다.", g_recentFiles[idx]);
-                        MessageBoxW(hWnd, msg, L"파일 없음", MB_OK | MB_ICONWARNING);
-                        free(msg);
+                    size_t mlen = strlen(g_recentFiles[idx]) + 128;
+                    char *u8Msg = (char *)malloc(mlen);
+                    if (u8Msg) {
+                        wchar_t *wMsg;
+                        snprintf(u8Msg, mlen, "파일을 찾을 수 없습니다:\n%s\n\n최근 파일 목록에서 제거합니다.", g_recentFiles[idx]);
+                        wMsg = utf8_to_utf16(u8Msg, -1, NULL);
+                        if (wMsg) {
+                            MessageBoxW(hWnd, wMsg, L"파일 없음", MB_OK | MB_ICONWARNING);
+                            free(wMsg);
+                        }
+                        free(u8Msg);
                     }
                     recent_remove(idx);
                 }
@@ -1566,11 +1735,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_FILE_EXPORT_PDF: {
             OPENFILENAMEW ofn = {0};
             wchar_t *fileBuf = (wchar_t *)calloc(LONG_PATH_MAX, sizeof(wchar_t));
-            wchar_t err[256] = {0};
+            char err[256] = {0};
             if (!fileBuf) return 0;
             if (g_app.currentPath[0]) {
-                wchar_t *defName = path_with_ext(path_name(g_app.currentPath), L".pdf");
-                wcsncpy_s(fileBuf, LONG_PATH_MAX, defName, _TRUNCATE);
+                char *defName = path_with_ext(path_name(g_app.currentPath), ".pdf");
+                wchar_t *wdef = utf8_to_utf16(defName ? defName : "Document.pdf", -1, NULL);
+                if (wdef) {
+                    wcsncpy_s(fileBuf, LONG_PATH_MAX, wdef, _TRUNCATE);
+                    free(wdef);
+                }
                 free(defName);
             } else {
                 wcscpy_s(fileBuf, LONG_PATH_MAX, L"Document.pdf");
@@ -1583,11 +1756,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             ofn.lpstrDefExt = L"pdf";
             ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
             if (GetSaveFileNameW(&ofn)) {
-                if (export_pdf(g_app.doc, fileBuf, err, 256) == 0) {
+                char *u8Out = utf16_to_utf8(fileBuf, -1, NULL);
+                if (u8Out && export_pdf(g_app.doc, u8Out, err, sizeof(err)) == 0) {
                     MessageBoxW(hWnd, L"PDF 문서를 성공적으로 내보냈습니다.", L"완료", MB_OK | MB_ICONINFORMATION);
                 } else {
-                    MessageBoxW(hWnd, err[0] ? err : L"PDF 내보내기 실패", L"오류", MB_OK | MB_ICONERROR);
+                    wchar_t *werr = err[0] ? utf8_to_utf16(err, -1, NULL) : NULL;
+                    MessageBoxW(hWnd, werr ? werr : L"PDF 내보내기 실패", L"오류", MB_OK | MB_ICONERROR);
+                    free(werr);
                 }
+                free(u8Out);
             }
             free(fileBuf);
             return 0;
@@ -1596,11 +1773,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_FILE_EXPORT_DOCX: {
             OPENFILENAMEW ofn = {0};
             wchar_t *fileBuf = (wchar_t *)calloc(LONG_PATH_MAX, sizeof(wchar_t));
-            wchar_t err[256] = {0};
+            char err[256] = {0};
             if (!fileBuf) return 0;
             if (g_app.currentPath[0]) {
-                wchar_t *defName = path_with_ext(path_name(g_app.currentPath), L".docx");
-                wcsncpy_s(fileBuf, LONG_PATH_MAX, defName, _TRUNCATE);
+                char *defName = path_with_ext(path_name(g_app.currentPath), ".docx");
+                wchar_t *wdef = utf8_to_utf16(defName ? defName : "Document.docx", -1, NULL);
+                if (wdef) {
+                    wcsncpy_s(fileBuf, LONG_PATH_MAX, wdef, _TRUNCATE);
+                    free(wdef);
+                }
                 free(defName);
             } else {
                 wcscpy_s(fileBuf, LONG_PATH_MAX, L"Document.docx");
@@ -1613,11 +1794,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             ofn.lpstrDefExt = L"docx";
             ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
             if (GetSaveFileNameW(&ofn)) {
-                if (docx_write(g_app.doc, fileBuf, err, 256) == 0) {
+                char *u8Out = utf16_to_utf8(fileBuf, -1, NULL);
+                if (u8Out && docx_write(g_app.doc, u8Out, err, sizeof(err)) == 0) {
                     MessageBoxW(hWnd, L"Word (DOCX) 문서를 성공적으로 내보냈습니다.", L"완료", MB_OK | MB_ICONINFORMATION);
                 } else {
-                    MessageBoxW(hWnd, err[0] ? err : L"DOCX 내보내기 실패", L"오류", MB_OK | MB_ICONERROR);
+                    wchar_t *werr = err[0] ? utf8_to_utf16(err, -1, NULL) : NULL;
+                    MessageBoxW(hWnd, werr ? werr : L"DOCX 내보내기 실패", L"오류", MB_OK | MB_ICONERROR);
+                    free(werr);
                 }
+                free(u8Out);
             }
             free(fileBuf);
             return 0;
@@ -1667,8 +1852,15 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
 
         case IDM_VIEW_REFRESH:
-            if (g_app.currentPath[0]) open_file(g_app.currentPath);
-            else load_sample_content();
+            if (g_app.currentPath[0]) {
+                char *copy = _strdup(g_app.currentPath);
+                if (copy) {
+                    open_file(copy);
+                    free(copy);
+                }
+            } else {
+                load_sample_content();
+            }
             return 0;
 
         case IDM_SETTINGS_FONT:
@@ -1676,9 +1868,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
 
         case IDM_SETTINGS_BODY_FONT: {
-            wchar_t face[64];
-            wcsncpy_s(face, 64, font_get_family_face(FAM_BODY), _TRUNCATE);
-            if (pick_font_face(hWnd, face, 64, 0)) {
+            char face[128];
+            strncpy_s(face, sizeof(face), font_get_family_face(FAM_BODY), _TRUNCATE);
+            if (pick_font_face(hWnd, face, sizeof(face), 0)) {
                 font_set_family_face(FAM_BODY, face);
                 settings_save();
                 rebuild_layout();
@@ -1687,9 +1879,9 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         case IDM_SETTINGS_MONO_FONT: {
-            wchar_t face[64];
-            wcsncpy_s(face, 64, font_get_family_face(FAM_MONO), _TRUNCATE);
-            if (pick_font_face(hWnd, face, 64, 1)) {
+            char face[128];
+            strncpy_s(face, sizeof(face), font_get_family_face(FAM_MONO), _TRUNCATE);
+            if (pick_font_face(hWnd, face, sizeof(face), 1)) {
                 font_set_family_face(FAM_MONO, face);
                 settings_save();
                 rebuild_layout();
@@ -1710,7 +1902,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_HELP_ABOUT:
             MessageBoxW(hWnd,
                         L"Lilac the Markdown Viewer\n\n"
-                        L"by ym2413-opll, Version 1.2.0.\n",
+                        L"by ym2413-opll, Version 1.3.0.\n",
                         L"정보", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
@@ -1757,72 +1949,92 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
 
 /* ---------------- Entry Point ---------------- */
 
-int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLine, int nCmdShow)
+int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
+                    _In_ LPWSTR lpCmdLine, _In_ int nCmdShow)
 {
     WNDCLASSEXW wc = {0};
     MSG msg;
     HACCEL hAccel;
     HWND hWnd;
-    int argc = 0;
-    LPWSTR *argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    int argc = 0, i;
+    LPWSTR *wargv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    char **argv = NULL;
 
     (void)hPrevInstance;
     (void)lpCmdLine;
 
+    if (argc > 0 && wargv) {
+        argv = (char **)calloc((size_t)argc, sizeof(char *));
+        if (argv) {
+            for (i = 0; i < argc; i++) {
+                argv[i] = utf16_to_utf8(wargv[i], -1, NULL);
+            }
+        }
+        LocalFree(wargv);
+    }
+
     /* Handle command-line arguments */
-    if (argc >= 2) {
-        if (!_wcsicmp(argv[1], L"--register") || !_wcsicmp(argv[1], L"/register")) {
+    if (argc >= 2 && argv && argv[1]) {
+        if (!ascii_icmp(argv[1], "--register") || !ascii_icmp(argv[1], "/register")) {
             register_file_association(1);
             MessageBoxW(NULL, L"Lilac이 *.md 파일 기본 프로그램으로 성공적으로 등록되었습니다.", L"Lilac", MB_OK | MB_ICONINFORMATION);
-            LocalFree(argv);
+            for (i = 0; i < argc; i++) free(argv[i]);
+            free(argv);
             return 0;
         }
-        if (!_wcsicmp(argv[1], L"--unregister") || !_wcsicmp(argv[1], L"/unregister")) {
+        if (!ascii_icmp(argv[1], "--unregister") || !ascii_icmp(argv[1], "/unregister")) {
             register_file_association(0);
             MessageBoxW(NULL, L"Lilac *.md 파일 연결이 해제되었습니다.", L"Lilac", MB_OK | MB_ICONINFORMATION);
-            LocalFree(argv);
+            for (i = 0; i < argc; i++) free(argv[i]);
+            free(argv);
             return 0;
         }
-        if (!_wcsicmp(argv[1], L"--export-pdf") && argc >= 4) {
-            wchar_t err[256] = {0};
+        if (!ascii_icmp(argv[1], "--export-pdf") && argc >= 4 && argv[2] && argv[3]) {
+            char err[256] = {0};
             Doc *doc;
             font_init();
             settings_load();
             doc = doc_load_file(argv[2]);
             if (!doc) {
-                LocalFree(argv);
+                for (i = 0; i < argc; i++) free(argv[i]);
+                free(argv);
                 return 2;
             }
-            if (export_pdf(doc, argv[3], err, 256) != 0) {
+            if (export_pdf(doc, argv[3], err, sizeof(err)) != 0) {
                 doc_free(doc);
                 font_shutdown();
-                LocalFree(argv);
+                for (i = 0; i < argc; i++) free(argv[i]);
+                free(argv);
                 return 3;
             }
             doc_free(doc);
             font_shutdown();
-            LocalFree(argv);
+            for (i = 0; i < argc; i++) free(argv[i]);
+            free(argv);
             return 0;
         }
-        if (!_wcsicmp(argv[1], L"--export-docx") && argc >= 4) {
-            wchar_t err[256] = {0};
+        if (!ascii_icmp(argv[1], "--export-docx") && argc >= 4 && argv[2] && argv[3]) {
+            char err[256] = {0};
             Doc *doc;
             font_init();
             settings_load();
             doc = doc_load_file(argv[2]);
             if (!doc) {
-                LocalFree(argv);
+                for (i = 0; i < argc; i++) free(argv[i]);
+                free(argv);
                 return 2;
             }
-            if (docx_write(doc, argv[3], err, 256) != 0) {
+            if (docx_write(doc, argv[3], err, sizeof(err)) != 0) {
                 doc_free(doc);
                 font_shutdown();
-                LocalFree(argv);
+                for (i = 0; i < argc; i++) free(argv[i]);
+                free(argv);
                 return 3;
             }
             doc_free(doc);
             font_shutdown();
-            LocalFree(argv);
+            for (i = 0; i < argc; i++) free(argv[i]);
+            free(argv);
             return 0;
         }
     }
@@ -1859,7 +2071,10 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
     wc.lpszMenuName = MAKEINTRESOURCEW(IDR_MAINMENU);
 
     if (!RegisterClassExW(&wc)) {
-        LocalFree(argv);
+        if (argv) {
+            for (i = 0; i < argc; i++) free(argv[i]);
+            free(argv);
+        }
         return 1;
     }
 
@@ -1873,19 +2088,25 @@ int WINAPI wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPWSTR lpCmdLi
         NULL, NULL, hInstance, NULL);
 
     if (!hWnd) {
-        LocalFree(argv);
+        if (argv) {
+            for (i = 0; i < argc; i++) free(argv[i]);
+            free(argv);
+        }
         return 1;
     }
 
     g_app.hWnd = hWnd;
 
     /* If a file was passed on the command line (e.g. double click), open it */
-    if (argc >= 2 && argv[1][0] != '-' && argv[1][0] != '/') {
+    if (argc >= 2 && argv && argv[1] && argv[1][0] != '-' && argv[1][0] != '/') {
         open_file(argv[1]);
     } else {
         load_sample_content();
     }
-    LocalFree(argv);
+    if (argv) {
+        for (i = 0; i < argc; i++) free(argv[i]);
+        free(argv);
+    }
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);

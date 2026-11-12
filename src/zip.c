@@ -5,6 +5,8 @@
 #include <windows.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
+#include <stdint.h>
 #include "zip.h"
 
 typedef struct ZipEntry {
@@ -27,6 +29,7 @@ ZipWriter *zip_new(void)
 {
     ZipWriter *z = (ZipWriter *)calloc(1, sizeof *z);
     SYSTEMTIME st;
+    if (!z) return NULL;
     GetLocalTime(&st);
     z->dosTime = (uint16_t)((st.wHour << 11) | (st.wMinute << 5) | (st.wSecond / 2));
     z->dosDate = (uint16_t)(((st.wYear - 1980) << 9) | (st.wMonth << 5) | st.wDay);
@@ -38,14 +41,29 @@ int zip_add(ZipWriter *z, const char *name, const void *data, size_t len, int co
     ZipEntry *e;
     uint8_t *comp = NULL;
     size_t clen = 0;
-    size_t nlen = strlen(name);
-    if (z->n == z->cap) {
-        z->cap = z->cap ? z->cap * 2 : 16;
-        z->ent = (ZipEntry *)realloc(z->ent, z->cap * sizeof(ZipEntry));
+    size_t nlen;
+    char *dupName;
+    if (!z || !name || (len > 0 && !data)) return -1;
+    nlen = strlen(name);
+    if (nlen > 0xFFFFu || len > 0xFFFFFFFFu || z->data.n > 0xFFFFFFFFu || z->n >= 65535) return -1;
+    if (z->n >= z->cap) {
+        int newCap;
+        ZipEntry *ne;
+        if (z->cap <= 0) newCap = 16;
+        else if (z->cap > INT_MAX / 2) return -1;
+        else newCap = z->cap * 2;
+        if ((size_t)newCap > SIZE_MAX / sizeof(ZipEntry)) return -1;
+        ne = (ZipEntry *)realloc(z->ent, (size_t)newCap * sizeof(ZipEntry));
+        if (!ne) return -1;
+        z->ent = ne;
+        z->cap = newCap;
     }
-    e = &z->ent[z->n++];
+    dupName = _strdup(name);
+    if (!dupName) return -1;
+    e = &z->ent[z->n];
     memset(e, 0, sizeof *e);
-    e->name = _strdup(name);
+    e->name = dupName;
+    z->n++;
     e->crc = crc32_calc(data, len);
     e->usize = (uint32_t)len;
     e->offset = (uint32_t)z->data.n;
@@ -75,7 +93,7 @@ int zip_add(ZipWriter *z, const char *name, const void *data, size_t len, int co
     return 0;
 }
 
-int zip_close(ZipWriter *z, const wchar_t *path)
+int zip_close(ZipWriter *z, const char *path)
 {
     uint32_t cdStart = (uint32_t)z->data.n, cdSize;
     int i, rc;
@@ -119,8 +137,10 @@ void zip_discard(ZipWriter *z)
 {
     int i;
     if (!z) return;
-    for (i = 0; i < z->n; i++) free(z->ent[i].name);
-    free(z->ent);
+    if (z->ent) {
+        for (i = 0; i < z->n; i++) free(z->ent[i].name);
+        free(z->ent);
+    }
     buf_free(&z->data);
     free(z);
 }

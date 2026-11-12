@@ -1,5 +1,6 @@
 /*
  * zip.h - minimal ZIP archive writer (used for DOCX).
+ * All paths and entry names are UTF-8 internally.
  */
 #ifndef MV_ZIP_H
 #define MV_ZIP_H
@@ -16,8 +17,8 @@ typedef struct ZipWriter ZipWriter;
 ZipWriter *zip_new(void);
 /* Add a file. name is UTF-8 with '/' separators. compress: 1 = deflate, 0 = store. */
 int        zip_add(ZipWriter *z, const char *name, const void *data, size_t len, int compress);
-/* Write to path and free the writer. Returns 0 on success. */
-int        zip_close(ZipWriter *z, const wchar_t *path);
+/* Write to UTF-8 path and free the writer. Returns 0 on success. */
+int        zip_close(ZipWriter *z, const char *path);
 void       zip_discard(ZipWriter *z);
 
 #ifdef __cplusplus

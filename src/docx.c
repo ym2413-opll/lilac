@@ -12,17 +12,18 @@
 #include "image.h"
 #include "font.h"
 #include "syntax.h"
+#include "math.h"
 
-/* Helper to sanitize a bookmark name for Word */
-static void sanitize_bookmark(const wchar_t *slug, wchar_t *out, int maxlen)
+/* Helper to sanitize a bookmark name for Word (UTF-8) */
+static void sanitize_bookmark(const char *slug, char *out, int maxlen)
 {
     int o = 0, i;
-    wcscpy_s(out, maxlen, L"bm_");
+    strncpy_s(out, (size_t)maxlen, "bm_", _TRUNCATE);
     o = 3;
-    for (i = 0; slug[i] && o < maxlen - 1; i++) {
-        wchar_t c = slug[i];
+    for (i = 0; slug && slug[i] && o < maxlen - 1; i++) {
+        unsigned char c = (unsigned char)slug[i];
         if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_') {
-            out[o++] = c;
+            out[o++] = (char)c;
         } else {
             out[o++] = '_';
         }
@@ -157,9 +158,15 @@ static void emit_runs(DocxCtx *ctx, Buf *b, const Run *runs, int nruns)
                            cx, cy, relId, relId, relId, relId, cx, cy);
             } else {
                 buf_puts(b, "<w:r><w:rPr><w:i/><w:color w:val=\"888888\"/></w:rPr><w:t xml:space=\"preserve\">[Image: ");
-                buf_put_xml_w(b, r->text ? r->text : L"image", -1);
+                buf_put_xml(b, r->text ? r->text : "image", -1);
                 buf_puts(b, "]</w:t></w:r>");
             }
+            i++;
+            continue;
+        }
+
+        if (r->type == RN_MATH) {
+            math_write_omml(b, r->text ? r->text : "", r->len, (r->style & ST_MATH_DISPLAY) != 0);
             i++;
             continue;
         }
@@ -167,21 +174,19 @@ static void emit_runs(DocxCtx *ctx, Buf *b, const Run *runs, int nruns)
         /* Group runs under hyperlink */
         if (r->link >= 0) {
             int linkIdx = r->link;
-            const wchar_t *target = (linkIdx < ctx->doc->nlinks) ? ctx->doc->links[linkIdx] : L"";
+            const char *target = (linkIdx < ctx->doc->nlinks) ? ctx->doc->links[linkIdx] : "";
             int isAnchor = (target[0] == '#');
             int isSafe = isAnchor || link_is_safe_external(target);
             int relId = 0;
 
             if (isSafe) {
                 if (isAnchor) {
-                    wchar_t bm[64];
+                    char bm[64];
                     sanitize_bookmark(target + 1, bm, 64);
-                    buf_printf(b, "<w:hyperlink w:anchor=\"%ls\">", bm);
+                    buf_printf(b, "<w:hyperlink w:anchor=\"%s\">", bm);
                 } else {
-                    char *utf8 = utf16_to_utf8(target, -1, NULL);
                     relId = add_docx_rel(ctx, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",
-                                         utf8 ? utf8 : "", 1);
-                    free(utf8);
+                                         target, 1);
                     buf_printf(b, "<w:hyperlink r:id=\"rId%d\">", relId);
                 }
             }
@@ -195,7 +200,7 @@ static void emit_runs(DocxCtx *ctx, Buf *b, const Run *runs, int nruns)
                 if (kr->style & ST_STRIKE) buf_puts(b, "<w:strike/>");
                 if (kr->style & ST_CODE) buf_puts(b, "<w:rStyle w:val=\"VerbatimChar\"/>");
                 buf_puts(b, "</w:rPr><w:t xml:space=\"preserve\">");
-                buf_put_xml_w(b, kr->text, kr->len);
+                buf_put_xml(b, kr->text, kr->len);
                 buf_puts(b, "</w:t></w:r>");
                 i++;
             }
@@ -214,20 +219,20 @@ static void emit_runs(DocxCtx *ctx, Buf *b, const Run *runs, int nruns)
         if (r->style & ST_SUB) buf_puts(b, "<w:vertAlign w:val=\"subscript\"/>");
         if (r->style & ST_MARK) buf_puts(b, "<w:highlight w:val=\"yellow\"/>");
         buf_puts(b, "</w:rPr><w:t xml:space=\"preserve\">");
-        buf_put_xml_w(b, r->text, r->len);
+        buf_put_xml(b, r->text, r->len);
         buf_puts(b, "</w:t></w:r>");
         i++;
     }
 }
 
-static void docx_put_code_run(Buf *b, const wchar_t *text, int len, uint32_t col, int isItalic)
+static void docx_put_code_run(Buf *b, const char *text, int len, uint32_t col, int isItalic)
 {
     int p;
     if (len <= 0) return;
     buf_puts(b, "<w:r><w:rPr>");
     if (col != 0) {
         char colBuf[32];
-        sprintf(colBuf, "<w:color w:val=\"%06X\"/>", col & 0xFFFFFF);
+        snprintf(colBuf, sizeof(colBuf), "<w:color w:val=\"%06X\"/>", col & 0xFFFFFF);
         buf_puts(b, colBuf);
     }
     if (isItalic) buf_puts(b, "<w:i/>");
@@ -236,7 +241,7 @@ static void docx_put_code_run(Buf *b, const wchar_t *text, int len, uint32_t col
         if (text[p] == '\t') {
             buf_puts(b, "    ");
         } else {
-            buf_put_xml_w(b, text + p, 1);
+            buf_put_xml(b, text + p, 1);
         }
     }
     buf_puts(b, "</w:t></w:r>");
@@ -258,7 +263,7 @@ static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int list
 
     case BK_HEADING: {
         int bmId = ++ctx->nextBookmarkId;
-        wchar_t bm[64] = {0};
+        char bm[64] = {0};
         if (blk->anchor) sanitize_bookmark(blk->anchor, bm, 64);
 
         buf_printf(b, "<w:p><w:pPr><w:pStyle w:val=\"Heading%d\"/>", blk->level >= 1 && blk->level <= 6 ? blk->level : 1);
@@ -266,7 +271,7 @@ static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int list
         else if (blk->align == AL_RIGHT) buf_puts(b, "<w:jc w:val=\"right\"/>");
         buf_puts(b, "</w:pPr>");
 
-        if (bm[0]) buf_printf(b, "<w:bookmarkStart w:id=\"%d\" w:name=\"%ls\"/>", bmId, bm);
+        if (bm[0]) buf_printf(b, "<w:bookmarkStart w:id=\"%d\" w:name=\"%s\"/>", bmId, bm);
         emit_runs(ctx, b, blk->runs, blk->nruns);
         if (bm[0]) buf_printf(b, "<w:bookmarkEnd w:id=\"%d\"/>", bmId);
         buf_puts(b, "</w:p>");
@@ -288,6 +293,13 @@ static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int list
         break;
     }
 
+    case BK_MATH: {
+        buf_puts(b, "<w:p><w:pPr><w:jc w:val=\"center\"/></w:pPr>");
+        math_write_omml(b, blk->text ? blk->text : "", blk->textlen, 1);
+        buf_puts(b, "</w:p>");
+        break;
+    }
+
     case BK_QUOTE: {
         int k;
         for (k = 0; k < blk->nkids; k++) {
@@ -298,7 +310,7 @@ static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int list
 
     case BK_ALERT: {
         int kind = (blk->alert >= 0 && blk->alert < 5) ? blk->alert : AL_NOTE;
-        const wchar_t *title = doc_alert_title(kind);
+        const char *title = doc_alert_title(kind);
         const char *hex = "0969DA";
         const char *bgHex = "F0F6FC";
         int k;
@@ -313,7 +325,7 @@ static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int list
                       "<w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"%s\"/>"
                       "<w:spacing w:before=\"120\" w:after=\"60\"/>"
                       "</w:pPr>"
-                      "<w:r><w:rPr><w:b/><w:color w:val=\"%s\"/></w:rPr><w:t>%ls</w:t></w:r></w:p>",
+                      "<w:r><w:rPr><w:b/><w:color w:val=\"%s\"/></w:rPr><w:t>%s</w:t></w:r></w:p>",
                    hex, bgHex, hex, title);
 
         for (k = 0; k < blk->nkids; k++) {
@@ -503,7 +515,7 @@ static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int list
     }
 }
 
-int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
+int docx_write(Doc *doc, const char *path, char *err, int errcap)
 {
     DocxCtx ctx;
     ZipWriter *z = zip_new();
@@ -512,7 +524,7 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
     int i, rc;
 
     if (!doc || !path) {
-        if (err && errcap > 0) wcsncpy_s(err, errcap, L"Invalid argument", _TRUNCATE);
+        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Invalid argument", _TRUNCATE);
         return -1;
     }
 
@@ -538,6 +550,7 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
     /* Document.xml wrapping */
     buf_puts(&docBuf, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
                       "<w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
+                      "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\" "
                       "xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" "
                       "xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\" "
                       "xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\" "
@@ -554,7 +567,8 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
         Buf fnFile = {0};
         add_docx_rel(&ctx, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/footnotes", "footnotes.xml", 0);
         buf_puts(&fnFile, "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
-                          "<w:footnotes xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\">\r\n"
+                          "<w:footnotes xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\" "
+                          "xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\">\r\n"
                           "<w:footnote w:type=\"separator\" w:id=\"-1\"><w:p><w:r><w:separator/></w:r></w:p></w:footnote>\r\n"
                           "<w:footnote w:type=\"continuationSeparator\" w:id=\"0\"><w:p><w:r><w:continuationSeparator/></w:r></w:p></w:footnote>\r\n");
         buf_put(&fnFile, ctx.footnotes.p, ctx.footnotes.n);
@@ -615,7 +629,7 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
                         "<cp:coreProperties xmlns:cp=\"http://schemas.openxmlformats.org/package/2006/metadata/core-properties\" "
                         "xmlns:dc=\"http://purl.org/dc/elements/1.1/\">\r\n"
                         "  <dc:title>");
-        buf_put_xml_w(&core, doc->title ? doc->title : L"Document", -1);
+        buf_put_xml(&core, doc->title ? doc->title : "Document", -1);
         buf_puts(&core, "</dc:title>\r\n  <dc:creator>Lilac</dc:creator>\r\n</cp:coreProperties>");
         zip_add(z, "docProps/core.xml", core.p, core.n, 1);
         buf_free(&core);
@@ -641,9 +655,16 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
 
     /* word/styles.xml */
     {
-        const wchar_t *bodyFace = font_get_family_face(FAM_BODY);
-        const wchar_t *monoFace = font_get_family_face(FAM_MONO);
+        const char *bodyFace = font_get_family_face(FAM_BODY);
+        const char *monoFace = font_get_family_face(FAM_MONO);
+        Buf bEsc = {0}, mEsc = {0};
+        const char *bf, *mf;
         Buf sbuf = {0};
+
+        buf_put_xml(&bEsc, bodyFace ? bodyFace : "", -1);
+        buf_put_xml(&mEsc, monoFace ? monoFace : "", -1);
+        bf = bEsc.p ? bEsc.p : "";
+        mf = mEsc.p ? mEsc.p : "";
 
         buf_printf(&sbuf,
             "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\r\n"
@@ -651,7 +672,7 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
             "  <w:docDefaults>\r\n"
             "    <w:rPrDefault>\r\n"
             "      <w:rPr>\r\n"
-            "        <w:rFonts w:ascii=\"%ls\" w:hAnsi=\"%ls\" w:cs=\"%ls\" w:eastAsia=\"Malgun Gothic\"/>\r\n"
+            "        <w:rFonts w:ascii=\"%s\" w:hAnsi=\"%s\" w:cs=\"%s\" w:eastAsia=\"Malgun Gothic\"/>\r\n"
             "        <w:sz w:val=\"22\"/><w:szCs w:val=\"22\"/>\r\n"
             "        <w:color w:val=\"1F2328\"/>\r\n"
             "        <w:lang w:val=\"en-US\" w:eastAsia=\"ko-KR\"/>\r\n"
@@ -704,12 +725,12 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
             "                   <w:left w:val=\"single\" w:sz=\"4\" w:space=\"6\" w:color=\"D0D7DE\"/>"
             "                   <w:bottom w:val=\"single\" w:sz=\"4\" w:space=\"6\" w:color=\"D0D7DE\"/>"
             "                   <w:right w:val=\"single\" w:sz=\"4\" w:space=\"6\" w:color=\"D0D7DE\"/></w:pBdr></w:pPr>\r\n"
-            "    <w:rPr><w:rFonts w:ascii=\"%ls\" w:hAnsi=\"%ls\" w:cs=\"%ls\" w:eastAsia=\"Malgun Gothic\"/>"
+            "    <w:rPr><w:rFonts w:ascii=\"%s\" w:hAnsi=\"%s\" w:cs=\"%s\" w:eastAsia=\"Malgun Gothic\"/>"
             "           <w:sz w:val=\"19\"/><w:szCs w:val=\"19\"/><w:spacing w:val=\"10\"/></w:rPr>\r\n"
             "  </w:style>\r\n"
             "  <w:style w:type=\"character\" w:styleId=\"VerbatimChar\">\r\n"
             "    <w:name w:val=\"Verbatim Char\"/>\r\n"
-            "    <w:rPr><w:rFonts w:ascii=\"%ls\" w:hAnsi=\"%ls\" w:cs=\"%ls\" w:eastAsia=\"Malgun Gothic\"/>"
+            "    <w:rPr><w:rFonts w:ascii=\"%s\" w:hAnsi=\"%s\" w:cs=\"%s\" w:eastAsia=\"Malgun Gothic\"/>"
             "           <w:shd w:val=\"clear\" w:color=\"auto\" w:fill=\"EFF1F3\"/><w:sz w:val=\"19\"/><w:spacing w:val=\"10\"/></w:rPr>\r\n"
             "  </w:style>\r\n"
             "  <w:style w:type=\"character\" w:styleId=\"Hyperlink\">\r\n"
@@ -735,11 +756,13 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
             "                           <w:insideV w:val=\"single\" w:sz=\"4\" w:color=\"D0D7DE\"/></w:tblBorders></w:tblPr>\r\n"
             "  </w:style>\r\n"
             "</w:styles>",
-            bodyFace, bodyFace, bodyFace,
-            monoFace, monoFace, monoFace,
-            monoFace, monoFace, monoFace);
+            bf, bf, bf,
+            mf, mf, mf,
+            mf, mf, mf);
         zip_add(z, "word/styles.xml", sbuf.p, sbuf.n, 1);
         buf_free(&sbuf);
+        buf_free(&bEsc);
+        buf_free(&mEsc);
     }
 
     /* word/numbering.xml */
@@ -780,7 +803,7 @@ int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
 
     rc = zip_close(z, path);
     if (rc != 0 && err && errcap > 0) {
-        wcsncpy_s(err, errcap, L"Failed to write DOCX file", _TRUNCATE);
+        strncpy_s(err, (size_t)errcap, "Failed to write DOCX file", _TRUNCATE);
     }
     return rc;
 }

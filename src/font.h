@@ -5,6 +5,8 @@
  * (cmap, hmtx, head, hhea, OS/2, name) so that layout metrics are exact and
  * identical for the screen renderer (GDI, glyph indices) and the PDF writer
  * (embedded subset fonts).
+ *
+ * All face names and fallback chains are UTF-8 internally.
  */
 #ifndef MV_FONT_H
 #define MV_FONT_H
@@ -17,7 +19,7 @@ extern "C" {
 
 typedef struct Font {
     int      id;            /* index in the global font table (0..n-1) */
-    wchar_t  face[32];      /* GDI face name, e.g. L"Segoe UI" */
+    char     face[64];      /* GDI face name in UTF-8, e.g. "Segoe UI" */
     int      bold, italic;  /* requested style */
     int      synthBold;     /* requested bold but the font file is not bold (must emulate) */
     int      synthItalic;   /* requested italic but the font file is not italic (must emulate) */
@@ -51,14 +53,15 @@ typedef struct Font {
 typedef enum FontFamily {
     FAM_BODY = 0,   /* Segoe UI -> Malgun Gothic -> ... */
     FAM_MONO,       /* Consolas -> D2Coding/Malgun Gothic -> ... */
+    FAM_MATH,       /* Cambria Math -> Cambria -> Times New Roman -> Segoe UI Symbol -> ... */
     FAM_COUNT
 } FontFamily;
 
 void  font_init(void);
 void  font_shutdown(void);
 
-/* Get (cached) font by face/style, NULL if not installed or unusable. */
-Font *font_get(const wchar_t *face, int bold, int italic);
+/* Get (cached) font by UTF-8 face/style, NULL if not installed or unusable. */
+Font *font_get(const char *face, int bold, int italic);
 /* Number of fonts in the global table and access by id (for the PDF writer). */
 int   font_count(void);
 Font *font_by_id(int id);
@@ -76,13 +79,13 @@ Font *font_resolve(int family, int bold, int italic, uint32_t cp, int *gid);
 /* Primary font for a family/style (used for line metrics). */
 Font *font_primary(int family, int bold, int italic);
 
-/* Set/get preferred font face for a family (e.g. FAM_BODY or FAM_MONO). */
-void           font_set_family_face(int family, const wchar_t *face);
-const wchar_t *font_get_family_face(int family);
+/* Set/get preferred UTF-8 font face for a family (FAM_BODY, FAM_MONO, FAM_MATH). */
+void        font_set_family_face(int family, const char *face);
+const char *font_get_family_face(int family);
 
-/* Set/get prioritized fallback font chain for a family (comma/semicolon-separated). */
-void           font_set_family_chain(int family, const wchar_t *chain);
-const wchar_t *font_get_family_chain(int family);
+/* Set/get prioritized fallback UTF-8 font chain for a family (comma/semicolon-separated). */
+void        font_set_family_chain(int family, const char *chain);
+const char *font_get_family_chain(int family);
 
 /* Read a raw table from the font file (tag e.g. 'glyf' as 0x676C7966 big-endian order
  * written as MV_TAG('g','l','y','f')). Returns malloc()ed buffer or NULL. */

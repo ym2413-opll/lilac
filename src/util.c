@@ -1,5 +1,7 @@
 /*
  * util.c - shared helpers (see util.h).
+ * All internal strings and paths are UTF-8 (char *); UTF-16 (wchar_t *) is used
+ * strictly at Win32 API boundaries.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -57,24 +59,13 @@ void arena_free(Arena *a)
     a->head = NULL;
 }
 
-wchar_t *arena_wcsndup(Arena *a, const wchar_t *s, int len)
-{
-    wchar_t *r;
-    if (!s) return NULL;
-    if (len < 0) len = (int)wcslen(s);
-    r = (wchar_t *)arena_alloc(a, (len + 1) * sizeof(wchar_t));
-    memcpy(r, s, len * sizeof(wchar_t));
-    r[len] = 0;
-    return r;
-}
-
 char *arena_strndup(Arena *a, const char *s, int len)
 {
     char *r;
     if (!s) return NULL;
     if (len < 0) len = (int)strlen(s);
-    r = (char *)arena_alloc(a, len + 1);
-    memcpy(r, s, len);
+    r = (char *)arena_alloc(a, (size_t)len + 1);
+    memcpy(r, s, (size_t)len);
     r[len] = 0;
     return r;
 }
@@ -83,11 +74,19 @@ char *arena_strndup(Arena *a, const char *s, int len)
 
 void buf_reserve(Buf *b, size_t extra)
 {
-    if (b->n + extra + 1 > b->cap) {
-        size_t nc = b->cap ? b->cap * 2 : 256;
-        while (nc < b->n + extra + 1) nc *= 2;
-        b->p = (char *)realloc(b->p, nc);
-        if (!b->p) { fprintf(stderr, "out of memory\n"); abort(); }
+    size_t needed;
+    if (extra > SIZE_MAX - b->n - 1) { fprintf(stderr, "buffer overflow\n"); abort(); }
+    needed = b->n + extra + 1;
+    if (needed > b->cap) {
+        size_t nc = b->cap ? b->cap : 256;
+        char *np;
+        while (nc < needed) {
+            if (nc > SIZE_MAX / 2) { nc = needed; break; }
+            nc *= 2;
+        }
+        np = (char *)realloc(b->p, nc);
+        if (!np) { fprintf(stderr, "out of memory\n"); abort(); }
+        b->p = np;
         b->cap = nc;
     }
 }
@@ -95,13 +94,13 @@ void buf_reserve(Buf *b, size_t extra)
 void buf_put(Buf *b, const void *data, size_t len)
 {
     buf_reserve(b, len);
-    memcpy(b->p + b->n, data, len);
+    if (len) memcpy(b->p + b->n, data, len);
     b->n += len;
     b->p[b->n] = 0;
 }
 
 void buf_putc(Buf *b, char c) { buf_put(b, &c, 1); }
-void buf_puts(Buf *b, const char *s) { buf_put(b, s, strlen(s)); }
+void buf_puts(Buf *b, const char *s) { if (s) buf_put(b, s, strlen(s)); }
 
 void buf_printf(Buf *b, const char *fmt, ...)
 {
@@ -123,43 +122,11 @@ void buf_printf(Buf *b, const char *fmt, ...)
     b->n += (size_t)n;
 }
 
-void buf_put_w(Buf *b, const wchar_t *s, int len)
+void buf_put_cp(Buf *b, uint32_t cp)
 {
-    int n;
-    if (!s) return;
-    if (len < 0) len = (int)wcslen(s);
-    if (!len) return;
-    n = WideCharToMultiByte(CP_UTF8, 0, s, len, NULL, 0, NULL, NULL);
-    buf_reserve(b, (size_t)n);
-    WideCharToMultiByte(CP_UTF8, 0, s, len, b->p + b->n, n, NULL, NULL);
-    b->n += (size_t)n;
-    b->p[b->n] = 0;
-}
-
-void buf_put_xml_w(Buf *b, const wchar_t *s, int len)
-{
-    int i, st = 0;
-    if (!s) return;
-    if (len < 0) len = (int)wcslen(s);
-    for (i = 0; i < len; i++) {
-        wchar_t c = s[i];
-        const char *rep = NULL;
-        switch (c) {
-        case '&': rep = "&amp;"; break;
-        case '<': rep = "&lt;"; break;
-        case '>': rep = "&gt;"; break;
-        case '"': rep = "&quot;"; break;
-        case '\'': rep = "&apos;"; break;
-        default:
-            if ((c < 0x20 && c != '\t' && c != '\n' && c != '\r') || c == 0xFFFE || c == 0xFFFF) rep = "";
-        }
-        if (rep) {
-            buf_put_w(b, s + st, i - st);
-            buf_puts(b, rep);
-            st = i + 1;
-        }
-    }
-    buf_put_w(b, s + st, len - st);
+    char u8[4];
+    int n = utf8_encode(cp, u8);
+    buf_put(b, u8, (size_t)n);
 }
 
 void buf_put_xml(Buf *b, const char *s, int len)
@@ -170,19 +137,29 @@ void buf_put_xml(Buf *b, const char *s, int len)
     for (i = 0; i < len; i++) {
         unsigned char c = (unsigned char)s[i];
         const char *rep = NULL;
+        int skip = 1;
         switch (c) {
         case '&': rep = "&amp;"; break;
         case '<': rep = "&lt;"; break;
         case '>': rep = "&gt;"; break;
         case '"': rep = "&quot;"; break;
         case '\'': rep = "&apos;"; break;
+        case 0xEF:
+            /* Filter U+FFFE (EF BF BE) and U+FFFF (EF BF BF) which are invalid in XML 1.0 */
+            if (i + 2 < len && (unsigned char)s[i + 1] == 0xBF &&
+                ((unsigned char)s[i + 2] == 0xBE || (unsigned char)s[i + 2] == 0xBF)) {
+                rep = "";
+                skip = 3;
+            }
+            break;
         default:
             if (c < 0x20 && c != '\t' && c != '\n' && c != '\r') rep = "";
         }
         if (rep) {
             buf_put(b, s + st, (size_t)(i - st));
             buf_puts(b, rep);
-            st = i + 1;
+            st = i + skip;
+            i += skip - 1;
         }
     }
     buf_put(b, s + st, (size_t)(len - st));
@@ -190,27 +167,88 @@ void buf_put_xml(Buf *b, const char *s, int len)
 
 void buf_free(Buf *b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
 
-/* ---------------- WBuf ---------------- */
+/* ---------------- UTF-8 & Win32 UTF-16 Boundary Encoding ---------------- */
 
-void wbuf_put(WBuf *b, const wchar_t *s, int len)
+uint32_t utf8_next(const char *s, int len, int *i)
 {
-    if (len < 0) len = (int)wcslen(s);
-    if (b->n + len + 1 > b->cap) {
-        int nc = b->cap ? b->cap * 2 : 128;
-        while (nc < b->n + len + 1) nc *= 2;
-        b->p = (wchar_t *)realloc(b->p, nc * sizeof(wchar_t));
-        if (!b->p) abort();
-        b->cap = nc;
+    int pos = *i;
+    uint32_t c;
+    if (pos >= len) return 0;
+    c = (unsigned char)s[pos++];
+    if (c < 0x80) {
+        *i = pos;
+        return c;
+    } else if ((c & 0xE0) == 0xC0 && pos < len && ((unsigned char)s[pos] & 0xC0) == 0x80) {
+        uint32_t cp = ((c & 0x1F) << 6) | ((unsigned char)s[pos] & 0x3F);
+        *i = pos + 1;
+        return cp >= 0x80 ? cp : 0xFFFD;
+    } else if ((c & 0xF0) == 0xE0 && pos + 1 < len &&
+               ((unsigned char)s[pos] & 0xC0) == 0x80 &&
+               ((unsigned char)s[pos + 1] & 0xC0) == 0x80) {
+        uint32_t cp = ((c & 0x0F) << 12) |
+                      (((unsigned char)s[pos] & 0x3F) << 6) |
+                      ((unsigned char)s[pos + 1] & 0x3F);
+        *i = pos + 2;
+        if (cp < 0x800 || (cp >= 0xD800 && cp <= 0xDFFF)) return 0xFFFD;
+        return cp;
+    } else if ((c & 0xF8) == 0xF0 && pos + 2 < len &&
+               ((unsigned char)s[pos] & 0xC0) == 0x80 &&
+               ((unsigned char)s[pos + 1] & 0xC0) == 0x80 &&
+               ((unsigned char)s[pos + 2] & 0xC0) == 0x80) {
+        uint32_t cp = ((c & 0x07) << 18) |
+                      (((unsigned char)s[pos] & 0x3F) << 12) |
+                      (((unsigned char)s[pos + 1] & 0x3F) << 6) |
+                      ((unsigned char)s[pos + 2] & 0x3F);
+        *i = pos + 3;
+        if (cp < 0x10000 || cp > 0x10FFFF) return 0xFFFD;
+        return cp;
     }
-    memcpy(b->p + b->n, s, len * sizeof(wchar_t));
-    b->n += len;
-    b->p[b->n] = 0;
+    *i = pos;
+    return 0xFFFD;
 }
 
-void wbuf_putc(WBuf *b, wchar_t c) { wbuf_put(b, &c, 1); }
-void wbuf_free(WBuf *b) { free(b->p); b->p = NULL; b->n = b->cap = 0; }
+int utf8_encode(uint32_t cp, char out[4])
+{
+    if (cp < 0x80) {
+        out[0] = (char)cp;
+        return 1;
+    } else if (cp < 0x800) {
+        out[0] = (char)(0xC0 | (cp >> 6));
+        out[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    } else if (cp < 0x10000) {
+        if (cp >= 0xD800 && cp <= 0xDFFF) cp = 0xFFFD;
+        out[0] = (char)(0xE0 | (cp >> 12));
+        out[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[2] = (char)(0x80 | (cp & 0x3F));
+        return 3;
+    } else if (cp <= 0x10FFFF) {
+        out[0] = (char)(0xF0 | (cp >> 18));
+        out[1] = (char)(0x80 | ((cp >> 12) & 0x3F));
+        out[2] = (char)(0x80 | ((cp >> 6) & 0x3F));
+        out[3] = (char)(0x80 | (cp & 0x3F));
+        return 4;
+    }
+    out[0] = (char)(signed char)-17; out[1] = (char)(signed char)-65; out[2] = (char)(signed char)-67; /* U+FFFD EF BF BD */
+    return 3;
+}
 
-/* ---------------- Encoding ---------------- */
+int ascii_icmp(const char *a, const char *b)
+{
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    return _stricmp(a, b);
+}
+
+int ascii_nicmp(const char *a, const char *b, size_t n)
+{
+    if (!n) return 0;
+    if (!a && !b) return 0;
+    if (!a) return -1;
+    if (!b) return 1;
+    return _strnicmp(a, b, n);
+}
 
 char *utf16_to_utf8(const wchar_t *s, int len, int *outlen)
 {
@@ -220,6 +258,7 @@ char *utf16_to_utf8(const wchar_t *s, int len, int *outlen)
     if (len < 0) len = (int)wcslen(s);
     n = len ? WideCharToMultiByte(CP_UTF8, 0, s, len, NULL, 0, NULL, NULL) : 0;
     r = (char *)malloc((size_t)n + 1);
+    if (!r) return NULL;
     if (n) WideCharToMultiByte(CP_UTF8, 0, s, len, r, n, NULL, NULL);
     r[n] = 0;
     if (outlen) *outlen = n;
@@ -234,38 +273,29 @@ wchar_t *utf8_to_utf16(const char *s, int len, int *outlen)
     if (len < 0) len = (int)strlen(s);
     n = len ? MultiByteToWideChar(CP_UTF8, 0, s, len, NULL, 0) : 0;
     r = (wchar_t *)malloc(((size_t)n + 1) * sizeof(wchar_t));
+    if (!r) return NULL;
     if (n) MultiByteToWideChar(CP_UTF8, 0, s, len, r, n);
     r[n] = 0;
     if (outlen) *outlen = n;
     return r;
 }
 
-uint32_t utf16_next(const wchar_t *s, int len, int *i)
-{
-    uint32_t c = s[*i];
-    (*i)++;
-    if (c >= 0xD800 && c <= 0xDBFF && *i < len) {
-        uint32_t d = s[*i];
-        if (d >= 0xDC00 && d <= 0xDFFF) {
-            (*i)++;
-            return 0x10000 + ((c - 0xD800) << 10) + (d - 0xDC00);
-        }
-    }
-    return c;
-}
+/* ---------------- Files & Paths (UTF-8 internally) ---------------- */
 
-/* ---------------- Files ---------------- */
-
-int file_read_all(const wchar_t *path, uint8_t **data, size_t *len)
+int file_read_all(const char *path, uint8_t **data, size_t *len)
 {
     HANDLE h;
     LARGE_INTEGER sz;
     uint8_t *p;
     DWORD got = 0;
     size_t total = 0;
+    wchar_t *wpath;
     if (!path || !path[0]) return -1;
-    h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+    wpath = utf8_to_utf16(path, -1, NULL);
+    if (!wpath) return -1;
+    h = CreateFileW(wpath, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                     NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION, NULL);
+    free(wpath);
     if (h == INVALID_HANDLE_VALUE) return -1;
     if (!GetFileSizeEx(h, &sz) || sz.QuadPart < 0 || sz.QuadPart > 0x10000000) { CloseHandle(h); return -1; }
     p = (uint8_t *)malloc((size_t)sz.QuadPart + 1);
@@ -281,11 +311,17 @@ int file_read_all(const wchar_t *path, uint8_t **data, size_t *len)
     return 0;
 }
 
-int file_write_all(const wchar_t *path, const void *data, size_t len)
+int file_write_all(const char *path, const void *data, size_t len)
 {
-    HANDLE h = CreateFileW(path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    wchar_t *wpath;
+    HANDLE h;
     DWORD wr = 0;
     size_t total = 0;
+    if (!path || !path[0]) return -1;
+    wpath = utf8_to_utf16(path, -1, NULL);
+    if (!wpath) return -1;
+    h = CreateFileW(wpath, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    free(wpath);
     if (h == INVALID_HANDLE_VALUE) return -1;
     while (total < len) {
         DWORD chunk = (DWORD)((len - total) > 0x10000000 ? 0x10000000 : (len - total));
@@ -296,107 +332,174 @@ int file_write_all(const wchar_t *path, const void *data, size_t len)
     return 0;
 }
 
-wchar_t *path_dir(const wchar_t *path)
+int file_exists(const char *path)
 {
-    const wchar_t *name = path_name(path);
-    int n = (int)(name - path);
-    wchar_t *r;
+    wchar_t *wpath;
+    DWORD attr;
+    if (!path || !path[0]) return 0;
+    wpath = utf8_to_utf16(path, -1, NULL);
+    if (!wpath) return 0;
+    attr = GetFileAttributesW(wpath);
+    free(wpath);
+    return (attr != INVALID_FILE_ATTRIBUTES) ? 1 : 0;
+}
+
+char *path_full(const char *path)
+{
+    wchar_t *wpath;
+    DWORD n;
+    if (!path) return utf16_to_utf8(L"", 0, NULL);
+    wpath = utf8_to_utf16(path, -1, NULL);
+    if (!wpath) return _strdup(path);
+    n = GetFullPathNameW(wpath, 0, NULL, NULL);
+    if (n > 0) {
+        wchar_t *wfull = (wchar_t *)malloc(n * sizeof(wchar_t));
+        if (wfull) {
+            DWORD actual = GetFullPathNameW(wpath, n, wfull, NULL);
+            if (actual > 0 && actual < n) {
+                char *res = utf16_to_utf8(wfull, (int)actual, NULL);
+                free(wfull);
+                free(wpath);
+                return res ? res : _strdup(path);
+            }
+            free(wfull);
+        }
+    }
+    free(wpath);
+    return _strdup(path);
+}
+
+char *path_dir(const char *path)
+{
+    const char *name;
+    int n;
+    char *r;
+    if (!path) return _strdup("");
+    name = path_name(path);
+    n = (int)(name - path);
     while (n > 0 && (path[n - 1] == '\\' || path[n - 1] == '/')) n--;
     if (n == 2 && path[1] == ':') { n = 3; } /* keep "C:\" */
-    r = (wchar_t *)malloc((n + 1) * sizeof(wchar_t));
-    memcpy(r, path, n * sizeof(wchar_t));
+    r = (char *)malloc((size_t)n + 1);
+    if (!r) return NULL;
+    memcpy(r, path, (size_t)n);
     r[n] = 0;
     if (n == 3 && r[2] != '\\') r[2] = '\\';
     return r;
 }
 
-const wchar_t *path_name(const wchar_t *path)
+const char *path_name(const char *path)
 {
-    const wchar_t *p = path, *last = path;
+    const char *p = path, *last = path;
+    if (!path) return "";
     for (; *p; p++)
         if (*p == '\\' || *p == '/' || *p == ':') last = p + 1;
     return last;
 }
 
-wchar_t *path_join(const wchar_t *dir, const wchar_t *rel)
+char *path_join(const char *dir, const char *rel)
 {
-    WBuf b = {0};
-    DWORD n;
-    int i;
-    if (!rel) rel = L"";
+    Buf b = {0};
+    char *full;
+    size_t i;
+    if (!rel) rel = "";
     /* absolute? */
     if ((rel[0] && rel[1] == ':') || (rel[0] == '\\' && rel[1] == '\\') || !dir || !dir[0]) {
-        wbuf_put(&b, rel, -1);
+        buf_puts(&b, rel);
     } else {
         while (rel[0] == '.' && (rel[1] == '/' || rel[1] == '\\')) rel += 2;
-        wbuf_put(&b, dir, -1);
-        if (b.n && b.p[b.n - 1] != '\\' && b.p[b.n - 1] != '/') wbuf_putc(&b, '\\');
+        buf_puts(&b, dir);
+        if (b.n && b.p[b.n - 1] != '\\' && b.p[b.n - 1] != '/') buf_putc(&b, '\\');
         if (rel[0] == '/' || rel[0] == '\\') rel++;
-        wbuf_put(&b, rel, -1);
+        buf_puts(&b, rel);
     }
     for (i = 0; i < b.n; i++) if (b.p[i] == '/') b.p[i] = '\\';
-    n = GetFullPathNameW(b.p, 0, NULL, NULL);
-    if (n > 0) {
-        wchar_t *r = (wchar_t *)malloc(n * sizeof(wchar_t));
-        if (r) {
-            DWORD actual = GetFullPathNameW(b.p, n, r, NULL);
-            if (actual > 0 && actual < n) {
-                wbuf_free(&b);
-                return r;
-            }
-            free(r);
-        }
-    }
-    return b.p;
+    full = path_full(b.p ? b.p : "");
+    buf_free(&b);
+    return full;
 }
 
-wchar_t *path_with_ext(const wchar_t *path, const wchar_t *ext)
+char *path_with_ext(const char *path, const char *ext)
 {
-    const wchar_t *name = path_name(path);
-    const wchar_t *dot = wcsrchr(name, '.');
-    int base = dot ? (int)(dot - path) : (int)wcslen(path);
-    int el = (int)wcslen(ext);
-    wchar_t *r = (wchar_t *)malloc((base + el + 1) * sizeof(wchar_t));
-    memcpy(r, path, base * sizeof(wchar_t));
-    memcpy(r + base, ext, (el + 1) * sizeof(wchar_t));
+    const char *name;
+    const char *dot;
+    size_t base;
+    size_t el;
+    char *r;
+    if (!path || !ext) return NULL;
+    name = path_name(path);
+    dot = strrchr(name, '.');
+    base = dot ? (size_t)(dot - path) : strlen(path);
+    el = strlen(ext);
+    r = (char *)malloc(base + el + 1);
+    if (!r) return NULL;
+    memcpy(r, path, base);
+    memcpy(r + base, ext, el + 1);
     return r;
 }
 
-int path_is_remote(const wchar_t *s)
+int path_is_within(const char *child, const char *dir)
+{
+    char *cf, *df;
+    size_t dlen, clen;
+    int ok = 0;
+    if (!child || !child[0] || !dir || !dir[0]) return 0;
+    if (path_is_remote(child)) return 0;
+    cf = path_full(child);
+    df = path_full(dir);
+    if (cf && df && cf[0] && df[0]) {
+        dlen = strlen(df);
+        clen = strlen(cf);
+        while (dlen > 0 && (df[dlen - 1] == '\\' || df[dlen - 1] == '/')) {
+            if (dlen == 3 && df[1] == ':') break; /* preserve "C:\" */
+            df[--dlen] = 0;
+        }
+        /* Reject if path canonicalization failed (e.g. contains relative "..") */
+        if (clen >= dlen && ascii_nicmp(cf, df, dlen) == 0) {
+            if (clen == dlen) ok = 1;
+            else if (dlen == 3 && df[1] == ':' && df[2] == '\\') ok = 1;
+            else if (cf[dlen] == '\\' || cf[dlen] == '/') ok = 1;
+        }
+    }
+    free(cf);
+    free(df);
+    return ok;
+}
+
+int path_is_remote(const char *s)
 {
     if (!s) return 0;
-    while (*s == L' ' || *s == L'\t' || *s == L'\r' || *s == L'\n') s++;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
     if (!*s) return 0;
 
     /* HTTP or HTTPS */
-    if (!_wcsnicmp(s, L"http://", 7) || !_wcsnicmp(s, L"https://", 8))
+    if (!ascii_nicmp(s, "http://", 7) || !ascii_nicmp(s, "https://", 8))
         return 1;
 
     /* UNC or network path: \\ or // or \/ or /\ */
-    if ((s[0] == L'\\' || s[0] == L'/') && (s[1] == L'\\' || s[1] == L'/'))
+    if ((s[0] == '\\' || s[0] == '/') && (s[1] == '\\' || s[1] == '/'))
         return 1;
 
     /* Device paths: \\?\ or \\.\ or //?/ or //./ */
-    if ((s[0] == L'\\' || s[0] == L'/') && (s[1] == L'\\' || s[1] == L'/') &&
-        (s[2] == L'?' || s[2] == L'.') && (s[3] == L'\\' || s[3] == L'/'))
+    if ((s[0] == '\\' || s[0] == '/') && (s[1] == '\\' || s[1] == '/') &&
+        (s[2] == '?' || s[2] == '.') && (s[3] == '\\' || s[3] == '/'))
         return 1;
 
     /* file:// with host or UNC (e.g. file://host/..., file:////...) */
-    if (!_wcsnicmp(s, L"file:", 5)) {
-        const wchar_t *p = s + 5;
-        if (!_wcsnicmp(p, L"///", 3)) {
+    if (!ascii_nicmp(s, "file:", 5)) {
+        const char *p = s + 5;
+        if (!ascii_nicmp(p, "///", 3)) {
             p += 3;
-            if ((p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/'))
+            if ((p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/'))
                 return 1;
             return 0;
-        } else if (!_wcsnicmp(p, L"//localhost/", 12)) {
+        } else if (!ascii_nicmp(p, "//localhost/", 12)) {
             p += 12;
-            if ((p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/'))
+            if ((p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/'))
                 return 1;
             return 0;
-        } else if (!_wcsnicmp(p, L"//", 2)) {
+        } else if (!ascii_nicmp(p, "//", 2)) {
             return 1;
-        } else if ((p[0] == L'\\' || p[0] == L'/') && (p[1] == L'\\' || p[1] == L'/')) {
+        } else if ((p[0] == '\\' || p[0] == '/') && (p[1] == '\\' || p[1] == '/')) {
             return 1;
         }
     }
@@ -404,18 +507,19 @@ int path_is_remote(const wchar_t *s)
     return 0;
 }
 
-int link_is_safe_external(const wchar_t *s)
+int link_is_safe_external(const char *s)
 {
-    const wchar_t *p;
+    const char *p;
     if (!s) return 0;
-    while (*s == L' ' || *s == L'\t' || *s == L'\r' || *s == L'\n') s++;
-    if (_wcsnicmp(s, L"http://", 7) == 0) p = s + 7;
-    else if (_wcsnicmp(s, L"https://", 8) == 0) p = s + 8;
-    else if (_wcsnicmp(s, L"mailto:", 7) == 0) p = s + 7;
+    while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
+    if (ascii_nicmp(s, "http://", 7) == 0) p = s + 7;
+    else if (ascii_nicmp(s, "https://", 8) == 0) p = s + 8;
+    else if (ascii_nicmp(s, "mailto:", 7) == 0) p = s + 7;
     else return 0;
     if (!*p) return 0;
     for (; *p; p++) {
-        if (*p < 0x20 || *p == 0x7F) return 0;
+        unsigned char c = (unsigned char)*p;
+        if (c < 0x20 || c == 0x7F) return 0;
     }
     return 1;
 }
@@ -441,12 +545,12 @@ static size_t do_deflate(const void *data, size_t len, uint8_t **out, int zlib)
 size_t zlib_compress(const void *data, size_t len, uint8_t **out) { return do_deflate(data, len, out, 1); }
 size_t deflate_raw(const void *data, size_t len, uint8_t **out) { return do_deflate(data, len, out, 0); }
 
-uint32_t crc32_calc(const void *data, size_t len)
+uint32_t crc32_update(uint32_t crc, const void *data, size_t len)
 {
     static uint32_t table[256];
     static int init = 0;
     const uint8_t *p = (const uint8_t *)data;
-    uint32_t c = 0xFFFFFFFFu;
+    uint32_t c = crc ^ 0xFFFFFFFFu;
     size_t i;
     if (!init) {
         uint32_t k, j;
@@ -457,6 +561,13 @@ uint32_t crc32_calc(const void *data, size_t len)
         }
         init = 1;
     }
-    for (i = 0; i < len; i++) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+    if (p) {
+        for (i = 0; i < len; i++) c = table[(c ^ p[i]) & 0xFF] ^ (c >> 8);
+    }
     return c ^ 0xFFFFFFFFu;
+}
+
+uint32_t crc32_calc(const void *data, size_t len)
+{
+    return crc32_update(0u, data, len);
 }

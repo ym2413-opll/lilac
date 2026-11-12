@@ -1,5 +1,6 @@
 /*
  * font.c - TrueType font metrics, cmap parsing, GDI font fallback & extraction.
+ * All internal strings are UTF-8; UTF-16 is used strictly at CreateFontW boundaries.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -19,10 +20,10 @@ typedef struct HFontEntry {
     HFONT hf;
 } HFontEntry;
 
-#define MAX_HFONTS 16
 typedef struct HFontCache {
-    HFontEntry entries[MAX_HFONTS];
+    HFontEntry *entries;
     int count;
+    int cap;
 } HFontCache;
 
 static uint16_t read_u16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
@@ -47,6 +48,7 @@ void font_shutdown(void)
                 for (j = 0; j < hc->count; j++) {
                     if (hc->entries[j].hf) DeleteObject(hc->entries[j].hf);
                 }
+                free(hc->entries);
                 free(hc);
             }
             free(f);
@@ -70,11 +72,14 @@ uint8_t *font_table(const Font *f, uint32_t tag, uint32_t *len)
     HFONT hf;
     HGDIOBJ old;
     uint8_t *buf;
+    wchar_t wface[64] = {0};
 
     if (!g_fontHdc) font_init();
+    if (!f || !g_fontHdc) return NULL;
+    MultiByteToWideChar(CP_UTF8, 0, f->face, -1, wface, 64);
     hf = CreateFontW(32, 0, 0, 0, f->bold ? FW_BOLD : FW_NORMAL, f->italic ? TRUE : FALSE,
                      FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                     CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, f->face);
+                     CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, wface);
     if (!hf) return NULL;
     old = SelectObject(g_fontHdc, hf);
 
@@ -86,8 +91,12 @@ uint8_t *font_table(const Font *f, uint32_t tag, uint32_t *len)
     }
     buf = (uint8_t *)malloc(sz);
     if (buf) {
-        GetFontData(g_fontHdc, dwTag, 0, buf, sz);
-        if (len) *len = sz;
+        if (GetFontData(g_fontHdc, dwTag, 0, buf, sz) == GDI_ERROR) {
+            free(buf);
+            buf = NULL;
+        } else if (len) {
+            *len = sz;
+        }
     }
     SelectObject(g_fontHdc, old);
     DeleteObject(hf);
@@ -169,7 +178,7 @@ static void setup_cmap(Font *f, const uint8_t *data, uint32_t len)
     }
 }
 
-Font *font_get(const wchar_t *face, int bold, int italic)
+Font *font_get(const char *face, int bold, int italic)
 {
     int i;
     Font *f;
@@ -179,8 +188,9 @@ Font *font_get(const wchar_t *face, int bold, int italic)
     uint32_t os2Len = 0, postLen = 0, nameLen = 0, cmapLen = 0;
     uint16_t numOfHMetrics = 0;
 
+    if (!face || !face[0]) return NULL;
     for (i = 0; i < g_numFonts; i++) {
-        if (!wcscmp(g_fonts[i]->face, face) &&
+        if (!strcmp(g_fonts[i]->face, face) &&
             g_fonts[i]->bold == bold &&
             g_fonts[i]->italic == italic) {
             return g_fonts[i];
@@ -192,7 +202,7 @@ Font *font_get(const wchar_t *face, int bold, int italic)
     if (!f) return NULL;
 
     f->id = g_numFonts;
-    wcsncpy_s(f->face, 32, face, _TRUNCATE);
+    strncpy_s(f->face, sizeof(f->face), face, _TRUNCATE);
     f->bold = bold;
     f->italic = italic;
 
@@ -272,7 +282,7 @@ Font *font_get(const wchar_t *face, int bold, int italic)
             if ((f->face[k] >= 'A' && f->face[k] <= 'Z') ||
                 (f->face[k] >= 'a' && f->face[k] <= 'z') ||
                 (f->face[k] >= '0' && f->face[k] <= '9')) {
-                f->psName[o++] = (char)f->face[k];
+                f->psName[o++] = f->face[k];
             }
         }
         if (bold && italic) strcpy_s(f->psName + o, 64 - o, "-BoldItalic");
@@ -358,42 +368,48 @@ int font_glyph(Font *f, uint32_t cp)
 #define MAX_FALLBACKS 16
 
 typedef struct FontChain {
-    wchar_t faces[MAX_FALLBACKS][64];
-    int count;
-    wchar_t formatted[512];
+    char faces[MAX_FALLBACKS][64];
+    int  count;
+    char formatted[512];
 } FontChain;
 
 static FontChain g_bodyChain;
 static FontChain g_monoChain;
+static FontChain g_mathChain;
 static int g_chainInited = 0;
 
-static const wchar_t g_defaultBodyChain[] =
-    L"Pretendard, 맑은 고딕, Segoe UI, Segoe UI Emoji, Segoe UI Symbol, Arial, Gulim";
-static const wchar_t g_defaultMonoChain[] =
-    L"D2Coding, Consolas, 맑은 고딕, Segoe UI Emoji, Segoe UI Symbol, Courier New";
+/* "\xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95" is UTF-8 for "맑은 고딕" */
+static const char g_defaultBodyChain[] =
+    "Pretendard, \xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95, Segoe UI, Segoe UI Emoji, Segoe UI Symbol, Arial, Gulim";
+static const char g_defaultMonoChain[] =
+    "D2Coding, Consolas, \xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95, Segoe UI Emoji, Segoe UI Symbol, Courier New";
+static const char g_defaultMathChain[] =
+    "Cambria Math, Cambria, Times New Roman, Segoe UI Symbol, Segoe UI, \xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95, Malgun Gothic";
 
-static void chain_set(FontChain *fc, const wchar_t *str, const wchar_t *defaultStr)
+static void chain_set(FontChain *fc, const char *str, const char *defaultStr)
 {
-    const wchar_t *p = (str && str[0]) ? str : defaultStr;
+    const char *p = (str && str[0]) ? str : defaultStr;
+    int i;
     fc->count = 0;
     while (*p && fc->count < MAX_FALLBACKS) {
-        while (*p == L' ' || *p == L'\t' || *p == L',' || *p == L';') p++;
+        const char *start, *end;
+        int len;
+        while (*p == ' ' || *p == '\t' || *p == ',' || *p == ';') p++;
         if (!*p) break;
-        const wchar_t *start = p;
-        while (*p && *p != L',' && *p != L';') p++;
-        const wchar_t *end = p;
-        while (end > start && (end[-1] == L' ' || end[-1] == L'\t')) end--;
-        int len = (int)(end - start);
+        start = p;
+        while (*p && *p != ',' && *p != ';') p++;
+        end = p;
+        while (end > start && (end[-1] == ' ' || end[-1] == '\t')) end--;
+        len = (int)(end - start);
         if (len > 0 && len < 64) {
             int dup = 0;
-            int i;
             for (i = 0; i < fc->count; i++) {
-                if (!_wcsnicmp(fc->faces[i], start, len) && fc->faces[i][len] == 0) {
+                if (!ascii_nicmp(fc->faces[i], start, (size_t)len) && fc->faces[i][len] == 0) {
                     dup = 1; break;
                 }
             }
             if (!dup) {
-                wcsncpy_s(fc->faces[fc->count], 64, start, len);
+                strncpy_s(fc->faces[fc->count], 64, start, (size_t)len);
                 fc->faces[fc->count][len] = 0;
                 fc->count++;
             }
@@ -402,25 +418,24 @@ static void chain_set(FontChain *fc, const wchar_t *str, const wchar_t *defaultS
 
     /* Ensure essential fallback fonts for Emojis and Symbols are always present */
     {
-        const wchar_t *essential[] = { L"Segoe UI Emoji", L"Segoe UI Symbol", L"Malgun Gothic", NULL };
+        const char *essential[] = { "Segoe UI Emoji", "Segoe UI Symbol", "Malgun Gothic", NULL };
         int e;
         for (e = 0; essential[e]; e++) {
             int found = 0;
-            int i;
             for (i = 0; i < fc->count; i++) {
-                if (!_wcsicmp(fc->faces[i], essential[e])) { found = 1; break; }
+                if (!ascii_icmp(fc->faces[i], essential[e])) { found = 1; break; }
             }
             if (!found && fc->count < MAX_FALLBACKS) {
-                wcsncpy_s(fc->faces[fc->count++], 64, essential[e], _TRUNCATE);
+                strncpy_s(fc->faces[fc->count++], 64, essential[e], _TRUNCATE);
             }
         }
     }
 
     /* Format into comma-separated string */
     fc->formatted[0] = 0;
-    for (int i = 0; i < fc->count; i++) {
-        if (i > 0) wcscat_s(fc->formatted, 512, L", ");
-        wcscat_s(fc->formatted, 512, fc->faces[i]);
+    for (i = 0; i < fc->count; i++) {
+        if (i > 0) strcat_s(fc->formatted, sizeof(fc->formatted), ", ");
+        strcat_s(fc->formatted, sizeof(fc->formatted), fc->faces[i]);
     }
 }
 
@@ -429,47 +444,59 @@ static void ensure_chains_inited(void)
     if (!g_chainInited) {
         chain_set(&g_bodyChain, NULL, g_defaultBodyChain);
         chain_set(&g_monoChain, NULL, g_defaultMonoChain);
+        chain_set(&g_mathChain, NULL, g_defaultMathChain);
         g_chainInited = 1;
     }
 }
 
-void font_set_family_chain(int family, const wchar_t *chain)
+static FontChain *get_chain(int family)
+{
+    ensure_chains_inited();
+    if (family == FAM_MONO) return &g_monoChain;
+    if (family == FAM_MATH) return &g_mathChain;
+    return &g_bodyChain;
+}
+
+void font_set_family_chain(int family, const char *chain)
 {
     ensure_chains_inited();
     if (family == FAM_MONO) {
         chain_set(&g_monoChain, chain, g_defaultMonoChain);
+    } else if (family == FAM_MATH) {
+        chain_set(&g_mathChain, chain, g_defaultMathChain);
     } else {
         chain_set(&g_bodyChain, chain, g_defaultBodyChain);
     }
 }
 
-const wchar_t *font_get_family_chain(int family)
+const char *font_get_family_chain(int family)
 {
-    ensure_chains_inited();
-    return (family == FAM_MONO) ? g_monoChain.formatted : g_bodyChain.formatted;
+    return get_chain(family)->formatted;
 }
 
-void font_set_family_face(int family, const wchar_t *face)
+void font_set_family_face(int family, const char *face)
 {
+    char newChain[512];
+    const char *curChain;
     ensure_chains_inited();
     if (!face || !face[0]) return;
-    wchar_t newChain[512];
-    const wchar_t *curChain = font_get_family_chain(family);
-    _snwprintf_s(newChain, 512, _TRUNCATE, L"%ls, %ls", face, curChain);
+    curChain = font_get_family_chain(family);
+    _snprintf_s(newChain, sizeof(newChain), _TRUNCATE, "%s, %s", face, curChain);
     font_set_family_chain(family, newChain);
 }
 
-const wchar_t *font_get_family_face(int family)
+const char *font_get_family_face(int family)
 {
-    ensure_chains_inited();
-    FontChain *fc = (family == FAM_MONO) ? &g_monoChain : &g_bodyChain;
-    return (fc->count > 0) ? fc->faces[0] : (family == FAM_MONO ? L"Consolas" : L"Segoe UI");
+    FontChain *fc = get_chain(family);
+    if (fc->count > 0) return fc->faces[0];
+    if (family == FAM_MONO) return "Consolas";
+    if (family == FAM_MATH) return "Cambria Math";
+    return "Segoe UI";
 }
 
 Font *font_primary(int family, int bold, int italic)
 {
-    ensure_chains_inited();
-    FontChain *fc = (family == FAM_MONO) ? &g_monoChain : &g_bodyChain;
+    FontChain *fc = get_chain(family);
     int i;
     for (i = 0; i < fc->count; i++) {
         Font *f = font_get(fc->faces[i], bold, italic);
@@ -479,13 +506,12 @@ Font *font_primary(int family, int bold, int italic)
             if (f) return f;
         }
     }
-    return font_get(L"Segoe UI", 0, 0);
+    return font_get("Segoe UI", 0, 0);
 }
 
 Font *font_resolve(int family, int bold, int italic, uint32_t cp, int *gid)
 {
-    ensure_chains_inited();
-    FontChain *fc = (family == FAM_MONO) ? &g_monoChain : &g_bodyChain;
+    FontChain *fc = get_chain(family);
     Font *primary = NULL;
     int i;
 
@@ -503,9 +529,9 @@ Font *font_resolve(int family, int bold, int italic, uint32_t cp, int *gid)
         }
     }
 
-    /* Fallback to Segoe UI Emoji and Segoe UI Symbol */
+    /* Fallback to Cambria Math, Segoe UI Emoji, Segoe UI Symbol, Malgun Gothic */
     {
-        const wchar_t *extra[] = { L"Segoe UI Emoji", L"Segoe UI Symbol", L"Malgun Gothic", NULL };
+        const char *extra[] = { "Cambria Math", "Segoe UI Emoji", "Segoe UI Symbol", "Malgun Gothic", NULL };
         for (i = 0; extra[i]; i++) {
             Font *f = font_get(extra[i], 0, 0);
             if (f) {
@@ -528,20 +554,33 @@ void *font_hfont(Font *f, int pixelSize)
     HFontCache *hc;
     int i;
     HFONT hf;
+    wchar_t wface[64] = {0};
 
     if (!f) return NULL;
-    if (!f->hfonts) f->hfonts = calloc(1, sizeof(HFontCache));
+    if (!f->hfonts) {
+        f->hfonts = calloc(1, sizeof(HFontCache));
+        if (!f->hfonts) return NULL;
+    }
     hc = (HFontCache *)f->hfonts;
 
     for (i = 0; i < hc->count; i++) {
         if (hc->entries[i].size == pixelSize) return hc->entries[i].hf;
     }
 
+    if (hc->count >= hc->cap) {
+        int nc = hc->cap ? hc->cap * 2 : 16;
+        HFontEntry *ne = (HFontEntry *)realloc(hc->entries, (size_t)nc * sizeof(HFontEntry));
+        if (!ne) return NULL;
+        hc->entries = ne;
+        hc->cap = nc;
+    }
+
+    MultiByteToWideChar(CP_UTF8, 0, f->face, -1, wface, 64);
     hf = CreateFontW(-pixelSize, 0, 0, 0, f->bold ? FW_BOLD : FW_NORMAL,
                      f->italic ? TRUE : FALSE, FALSE, FALSE,
                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, f->face);
-    if (hc->count < MAX_HFONTS) {
+                     CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, wface);
+    if (hf) {
         hc->entries[hc->count].size = pixelSize;
         hc->entries[hc->count].hf = hf;
         hc->count++;

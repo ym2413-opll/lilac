@@ -3305,6 +3305,19 @@ md_collect_marks(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines, int table_m
              * It can go beyond line->end as it may involve escaped new
              * line to form a hard break. */
             if(ch == _T('\\')  &&  off+1 < ctx->size  &&  (ISPUNCT(off+1) || ISNEWLINE(off+1))) {
+                if((ctx->parser.flags & MD_FLAG_LATEXMATHSPANS)  &&  off+1 < line->end) {
+                    CHAR next_ch = CH(off+1);
+                    if(next_ch == _T('(') || next_ch == _T('[')) {
+                        ADD_MARK(_T('$'), off, off+2, MD_MARK_POTENTIAL_OPENER);
+                        off += 2;
+                        continue;
+                    }
+                    if(next_ch == _T(')') || next_ch == _T(']')) {
+                        ADD_MARK(_T('$'), off, off+2, MD_MARK_POTENTIAL_CLOSER);
+                        off += 2;
+                        continue;
+                    }
+                }
                 /* Hard-break cannot be on the last line of the block. */
                 if(!ISNEWLINE(off+1)  ||  line_index+1 < n_lines)
                     ADD_MARK(ch, off, off+2, MD_MARK_RESOLVED);
@@ -3645,12 +3658,18 @@ md_collect_marks(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines, int table_m
                 while(tmp < line->end && CH(tmp) == ch)
                     tmp++;
 
-                if(tmp - off <= 2) {
+                if(tmp - off == 2) {
+                    ADD_MARK(ch, off, tmp, MD_MARK_POTENTIAL_OPENER | MD_MARK_POTENTIAL_CLOSER);
+                } else if(tmp - off == 1) {
                     unsigned flags = MD_MARK_POTENTIAL_OPENER | MD_MARK_POTENTIAL_CLOSER;
 
-                    if(off > line->beg  &&  !ISUNICODEWHITESPACEBEFORE(off)  &&  !ISUNICODEPUNCTBEFORE(off))
+                    /* Cannot open before whitespace, and cannot close after whitespace
+                     * or immediately before an ASCII digit (e.g. "$100 and $200"). */
+                    if(tmp < line->end  &&  ISUNICODEWHITESPACE(tmp))
                         flags &= ~MD_MARK_POTENTIAL_OPENER;
-                    if(tmp < line->end  &&  !ISUNICODEWHITESPACE(tmp)  &&  !ISUNICODEPUNCT(tmp))
+                    if(off > line->beg  &&  ISUNICODEWHITESPACEBEFORE(off))
+                        flags &= ~MD_MARK_POTENTIAL_CLOSER;
+                    if(tmp < line->end  &&  ISDIGIT(tmp))
                         flags &= ~MD_MARK_POTENTIAL_CLOSER;
                     if(flags != 0)
                         ADD_MARK(ch, off, tmp, flags);
@@ -4305,13 +4324,23 @@ md_analyze_dollar(MD_CTX* ctx, int mark_index)
     MD_MARK* mark = &ctx->marks[mark_index];
 
     if((mark->flags & MD_MARK_POTENTIAL_CLOSER)  &&  DOLLAR_OPENERS.top >= 0) {
-        /* If the potential closer has a non-matching number of $, discard */
+        /* If the potential closer has a non-matching delimiter, discard */
         MD_MARK* opener = &ctx->marks[DOLLAR_OPENERS.top];
         int opener_index = DOLLAR_OPENERS.top;
         MD_MARK* closer = mark;
         int closer_index = mark_index;
+        int match = 0;
 
-        if(opener->end - opener->beg == closer->end - closer->beg) {
+        if(CH(opener->beg) == _T('\\') || CH(closer->beg) == _T('\\')) {
+            if(CH(opener->beg) == _T('\\') && CH(closer->beg) == _T('\\') &&
+               ((CH(opener->beg + 1) == _T('(') && CH(closer->beg + 1) == _T(')')) ||
+                (CH(opener->beg + 1) == _T('[') && CH(closer->beg + 1) == _T(']'))))
+                match = 1;
+        } else if(opener->end - opener->beg == closer->end - closer->beg) {
+            match = 1;
+        }
+
+        if(match) {
             /* We are the matching closer */
             md_pop_openers(ctx, opener_index);
             md_disable_marks(ctx, opener_index+1, closer_index);
@@ -4721,6 +4750,20 @@ md_analyze_inlines(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines, int table
     /* Collect all marks. */
     MD_CHECK(md_collect_marks(ctx, lines, n_lines, table_mode));
 
+    /* (0) LaTeX math spans: resolve before brackets and table cell pipes so
+     * that '[', ']', '|', '_' and '*' inside $...$ / $$...$$ are disabled. */
+    if(ctx->parser.flags & MD_FLAG_LATEXMATHSPANS) {
+        md_analyze_marks(ctx, lines, n_lines, 0, ctx->n_marks, _T("$"), NULL);
+        DOLLAR_OPENERS.top = -1;
+        for(i = 0; i < ctx->n_marks; i++) {
+            if(ctx->marks[i].ch == _T('$')  &&  !(ctx->marks[i].flags & MD_MARK_RESOLVED)  &&
+               CH(ctx->marks[i].beg) == _T('\\')) {
+                ctx->marks[i].ch = _T('\\');
+                ctx->marks[i].flags = MD_MARK_RESOLVED;
+            }
+        }
+    }
+
     /* (1) Bracket spans: links, wiki links, footnotes. */
     md_analyze_marks(ctx, lines, n_lines, 0, ctx->n_marks, _T("[]!"), NULL);
     MD_CHECK(md_resolve_brackets(ctx, lines, n_lines));
@@ -5008,14 +5051,20 @@ md_process_inlines(MD_CTX* ctx, const MD_LINE* lines, MD_SIZE n_lines)
                     break;
 
                 case '$':
+                {
+                    MD_SPANTYPE span_type = (CH(mark->beg) == _T('\\'))
+                        ? ((CH(mark->beg + 1) == _T('(') || CH(mark->beg + 1) == _T(')'))
+                            ? MD_SPAN_LATEXMATH : MD_SPAN_LATEXMATH_DISPLAY)
+                        : ((mark->end - off) % 2 ? MD_SPAN_LATEXMATH : MD_SPAN_LATEXMATH_DISPLAY);
                     if(mark->flags & MD_MARK_OPENER) {
-                        MD_ENTER_SPAN((mark->end - off) % 2 ? MD_SPAN_LATEXMATH : MD_SPAN_LATEXMATH_DISPLAY, NULL);
+                        MD_ENTER_SPAN(span_type, NULL);
                         text_type = MD_TEXT_LATEXMATH;
                     } else {
-                        MD_LEAVE_SPAN((mark->end - off) % 2 ? MD_SPAN_LATEXMATH : MD_SPAN_LATEXMATH_DISPLAY, NULL);
+                        MD_LEAVE_SPAN(span_type, NULL);
                         text_type = MD_TEXT_NORMAL;
                     }
                     break;
+                }
 
                 case '[':       /* Footnote reference, link, wiki link, or image. */
                 case '!':

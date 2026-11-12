@@ -64,11 +64,11 @@ typedef struct LinkArea {
 } LinkArea;
 
 typedef struct Anchor {
-    wchar_t *name;      /* slug, e.g. "introduction" or "fn-1" */
-    wchar_t *title;     /* heading text (NULL for non-heading anchors) */
-    int      level;     /* heading level 1..6, 0 = non-heading anchor */
-    int      page;
-    float    y;         /* page-local y of the top of the target */
+    char *name;         /* slug, e.g. "introduction" or "fn-1" (UTF-8) */
+    char *title;        /* heading text (NULL for non-heading anchors, UTF-8) */
+    int   level;        /* heading level 1..6, 0 = non-heading anchor */
+    int   page;
+    float y;            /* page-local y of the top of the target */
 } Anchor;
 
 typedef struct LayoutOptions {
@@ -92,7 +92,7 @@ typedef struct Layout {
     int       npages;       /* >= 1 */
     float     pageWidth;    /* = opt.width */
     float     pageHeight;   /* paged: opt.pageHeight; continuous: total document height */
-    wchar_t  *text;         /* plain text of the document, for selection / search / ToUnicode */
+    char     *text;         /* UTF-8 plain text of the document, for selection / search / ToUnicode */
     int       textlen, textcap;
     uint32_t  background;   /* page background colour */
     Arena     arena;
@@ -106,7 +106,7 @@ int     layout_hit_text(const Layout *L, int page, float x, float y);
 /* Link index at point, or -1. */
 int     layout_hit_link(const Layout *L, int page, float x, float y);
 /* Find the anchor by name (case-insensitive), NULL if none. */
-const Anchor *layout_find_anchor(const Layout *L, const wchar_t *name);
+const Anchor *layout_find_anchor(const Layout *L, const char *name);
 /* Position (page, y) of the glyph containing text offset; returns 0 if found. */
 int     layout_text_pos(const Layout *L, int off, int *page, float *x, float *y);
 

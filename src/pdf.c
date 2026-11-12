@@ -57,11 +57,10 @@ static void pdf_end_obj(PdfWriter *pw)
  * '(' ')' '\' are backslash-escaped so attacker-controlled link targets cannot
  * terminate the string and inject PDF syntax (e.g. /Launch or /JavaScript actions).
  * Non-printable and non-ASCII bytes are percent-encoded (PDF URIs are 7-bit ASCII). */
-static void pdf_put_uri_string(Buf *b, const wchar_t *uri)
+static void pdf_put_uri_string(Buf *b, const char *uri)
 {
     static const char hex[] = "0123456789ABCDEF";
-    char *utf8 = utf16_to_utf8(uri ? uri : L"", -1, NULL);
-    const unsigned char *p = (const unsigned char *)(utf8 ? utf8 : "");
+    const unsigned char *p = (const unsigned char *)(uri ? uri : "");
     buf_putc(b, '(');
     for (; *p; p++) {
         unsigned char c = *p;
@@ -77,17 +76,28 @@ static void pdf_put_uri_string(Buf *b, const wchar_t *uri)
         }
     }
     buf_putc(b, ')');
-    free(utf8);
 }
 
-/* Write a text string as a UTF-16BE hex string "<FEFF....>".
+/* Write a UTF-8 text string as a UTF-16BE hex string "<FEFF....>".
  * Hex strings cannot be broken out of, and BOM-prefixed UTF-16 renders
  * non-Latin titles (e.g. Korean) correctly in PDF viewers. */
-static void pdf_put_text_string(Buf *b, const wchar_t *s)
+static void pdf_put_text_string(Buf *b, const char *s)
 {
     buf_puts(b, "<FEFF");
     if (s) {
-        for (; *s; s++) buf_printf(b, "%04X", (unsigned)(*s & 0xFFFF));
+        int len = (int)strlen(s);
+        int i = 0;
+        while (i < len) {
+            uint32_t cp = utf8_next(s, len, &i);
+            if (cp >= 0x10000 && cp <= 0x10FFFF) {
+                uint32_t u = cp - 0x10000;
+                uint16_t hi = (uint16_t)(0xD800 + (u >> 10));
+                uint16_t lo = (uint16_t)(0xDC00 + (u & 0x3FF));
+                buf_printf(b, "%04X%04X", (unsigned)hi, (unsigned)lo);
+            } else {
+                buf_printf(b, "%04X", (unsigned)(cp & 0xFFFF));
+            }
+        }
     }
     buf_putc(b, '>');
 }
@@ -222,9 +232,14 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
         return NULL;
     }
 
-    oldLoca = (uint32_t *)malloc((f->numGlyphs + 1) * sizeof(uint32_t));
-    newLoca = (uint32_t *)malloc((f->numGlyphs + 1) * sizeof(uint32_t));
+    oldLoca = (uint32_t *)malloc((size_t)(f->numGlyphs + 1) * sizeof(uint32_t));
+    newLoca = (uint32_t *)malloc((size_t)(f->numGlyphs + 1) * sizeof(uint32_t));
     newGlyf = (uint8_t *)malloc(newGlyfCap);
+    if (!oldLoca || !newLoca || !newGlyf) {
+        free(oldLoca); free(newLoca); free(newGlyf);
+        free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+        return NULL;
+    }
 
     for (g = 0; g <= f->numGlyphs; g++) {
         if (isLocaLong) {
@@ -246,8 +261,15 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
             if (gNext > gOff && gNext <= glyfLen) {
                 uint32_t gLen = gNext - gOff;
                 while (newGlyfSize + gLen + 4 > newGlyfCap) {
-                    newGlyfCap *= 2;
-                    newGlyf = (uint8_t *)realloc(newGlyf, newGlyfCap);
+                    size_t nextCap = newGlyfCap * 2;
+                    uint8_t *tmp = (nextCap > newGlyfCap) ? (uint8_t *)realloc(newGlyf, nextCap) : NULL;
+                    if (!tmp) {
+                        free(oldLoca); free(newLoca); free(newGlyf);
+                        free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+                        return NULL;
+                    }
+                    newGlyf = tmp;
+                    newGlyfCap = nextCap;
                 }
                 memcpy(newGlyf + newGlyfSize, glyf + gOff, gLen);
                 newGlyfSize += gLen;
@@ -262,6 +284,11 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
     {
         uint32_t newLocaLen = (f->numGlyphs + 1) * 4;
         uint8_t *newLocaBytes = (uint8_t *)malloc(newLocaLen);
+        if (!newLocaBytes) {
+            free(oldLoca); free(newLoca); free(newGlyf);
+            free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+            return NULL;
+        }
         for (g = 0; g <= f->numGlyphs; g++) {
             newLocaBytes[g * 4] = (uint8_t)(newLoca[g] >> 24);
             newLocaBytes[g * 4 + 1] = (uint8_t)(newLoca[g] >> 16);
@@ -364,7 +391,7 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
 
 /* ---------------- Main PDF Exporter ---------------- */
 
-int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
+int pdf_write(const Layout *L, const char *path, char *err, int errcap)
 {
     PdfWriter pw;
     int catalogObj, pagesObj, infoObj;
@@ -376,7 +403,7 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
     float ptW, ptH;
 
     if (!L || !path) {
-        if (err && errcap > 0) wcsncpy_s(err, errcap, L"Invalid argument", _TRUNCATE);
+        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Invalid argument", _TRUNCATE);
         return -1;
     }
 
@@ -540,9 +567,9 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
                          "<0000> <FFFF>\n"
                          "endcodespacerange\n");
 
-        /* Build mapping for used glyphs from Layout->text */
+        /* Build mapping for used glyphs from Layout->text (UTF-8) */
         {
-            typedef struct { int gid; wchar_t ch1, ch2; } CMapEntry;
+            typedef struct { int gid; uint16_t ch1, ch2; } CMapEntry;
             CMapEntry *entries = (CMapEntry *)malloc((size_t)fnt->numGlyphs * sizeof(CMapEntry));
             int totalEntries = 0;
             if (entries) {
@@ -555,10 +582,17 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
                             if (is_glyph_marked(&usedGlyphs[f], gidVal)) {
                                 int toff = it->toff[k];
                                 if (toff >= 0 && toff < L->textlen && totalEntries < fnt->numGlyphs) {
-                                    wchar_t ch = L->text[toff];
+                                    int tmpIdx = toff;
+                                    uint32_t cp = utf8_next(L->text, L->textlen, &tmpIdx);
                                     entries[totalEntries].gid = gidVal;
-                                    entries[totalEntries].ch1 = ch;
-                                    entries[totalEntries].ch2 = (ch >= 0xD800 && ch <= 0xDBFF && toff + 1 < L->textlen) ? L->text[toff + 1] : 0;
+                                    if (cp >= 0x10000 && cp <= 0x10FFFF) {
+                                        uint32_t u = cp - 0x10000;
+                                        entries[totalEntries].ch1 = (uint16_t)(0xD800 + (u >> 10));
+                                        entries[totalEntries].ch2 = (uint16_t)(0xDC00 + (u & 0x3FF));
+                                    } else {
+                                        entries[totalEntries].ch1 = (uint16_t)(cp & 0xFFFF);
+                                        entries[totalEntries].ch2 = 0;
+                                    }
                                     totalEntries++;
                                     /* Unmark so we don't emit duplicates */
                                     usedGlyphs[f].flags[gidVal >> 3] &= ~(1 << (gidVal & 7));
@@ -615,6 +649,11 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
     }
     pagesObj     = ++pw.nextObj; /* Reserve object ID for Pages catalog */
     ensure_xref_capacity(&pw, pagesObj);
+    /* Pre-assign page object IDs so forward #anchor links resolve accurately */
+    for (p = 0; p < pw.pageCount; p++) {
+        pw.pageObjs[p] = ++pw.nextObj;
+        ensure_xref_capacity(&pw, pw.pageObjs[p]);
+    }
 
     for (p = 0; p < L->npages; p++) {
         Buf content = {0};
@@ -773,7 +812,7 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
         for (i = 0; i < L->nlinks; i++) {
             const LinkArea *la = &L->links[i];
             if (la->page == p && la->link >= 0 && la->link < L->doc->nlinks) {
-                const wchar_t *target = L->doc->links[la->link];
+                const char *target = L->doc->links[la->link];
                 float x1 = la->x * 0.75f;
                 float y1 = ptH - (la->y + la->h) * 0.75f;
                 float x2 = (la->x + la->w) * 0.75f;
@@ -781,7 +820,7 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
 
                 if (target[0] == '#') {
                     const Anchor *anc = layout_find_anchor(L, target + 1);
-                    if (anc) {
+                    if (anc && anc->page >= 0 && anc->page < pw.pageCount) {
                         int annotObj = pdf_new_obj(&pw);
                         buf_printf(&pw.buf, "<< /Type /Annot /Subtype /Link /Rect [%.3f %.3f %.3f %.3f] /Border [0 0 0]\n"
                                             "/A << /S /GoTo /D [%d 0 R /XYZ 0 %.3f null] >> >>\n",
@@ -805,8 +844,9 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
         }
 
         /* Page Object */
-        pageObj = pdf_new_obj(&pw);
-        pw.pageObjs[p] = pageObj;
+        pageObj = pw.pageObjs[p];
+        pw.xref[pageObj] = (uint32_t)pw.buf.n;
+        buf_printf(&pw.buf, "%d 0 obj\n", pageObj);
         buf_printf(&pw.buf, "<< /Type /Page /Parent %d 0 R /MediaBox [0 0 %.3f %.3f]\n"
                             "/Contents %d 0 R\n"
                             "/Resources << /Font <<", pagesObj, ptW, ptH, contentObj);
@@ -860,7 +900,7 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
     /* 6. Document Info */
     infoObj = pdf_new_obj(&pw);
     buf_puts(&pw.buf, "<< /Producer (Lilac) /Title ");
-    pdf_put_text_string(&pw.buf, (L->doc && L->doc->title) ? L->doc->title : L"Document");
+    pdf_put_text_string(&pw.buf, (L->doc && L->doc->title) ? L->doc->title : "Document");
     buf_puts(&pw.buf, " >>\n");
     pdf_end_obj(&pw);
 
@@ -887,14 +927,14 @@ int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap)
     /* Write to file */
     if (file_write_all(path, pw.buf.p, pw.buf.n) != 0) {
         buf_free(&pw.buf);
-        if (err && errcap > 0) wcsncpy_s(err, errcap, L"Failed to write PDF file", _TRUNCATE);
+        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Failed to write PDF file", _TRUNCATE);
         return -1;
     }
     buf_free(&pw.buf);
     return 0;
 }
 
-int export_pdf(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
+int export_pdf(Doc *doc, const char *path, char *err, int errcap)
 {
     LayoutOptions opt = {0};
     Layout *L;
@@ -913,7 +953,7 @@ int export_pdf(Doc *doc, const wchar_t *path, wchar_t *err, int errcap)
 
     L = layout_build(doc, &opt);
     if (!L) {
-        if (err && errcap > 0) wcsncpy_s(err, errcap, L"Failed to layout document for PDF", _TRUNCATE);
+        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Failed to layout document for PDF", _TRUNCATE);
         return -1;
     }
 

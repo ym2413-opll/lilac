@@ -1,12 +1,11 @@
 /*
  * syntax.h - Markdown code block syntax highlighter.
- * Pure C, zero external dependencies.
+ * Pure C, zero external dependencies. Operates on UTF-8 strings.
  */
 #ifndef MV_SYNTAX_H
 #define MV_SYNTAX_H
 
 #include <stdint.h>
-#include <wchar.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -26,8 +25,8 @@ typedef enum SynTokType {
 } SynTokType;
 
 typedef struct SynToken {
-    int        start;   /* character offset in code text */
-    int        len;     /* character length */
+    int        start;   /* UTF-8 byte offset in code text */
+    int        len;     /* UTF-8 byte length */
     SynTokType type;    /* token type */
 } SynToken;
 
@@ -50,13 +49,13 @@ const SynColors *syntax_get_colors(int dark);
 /* Map a token type to its 0xRRGGBB color */
 uint32_t syntax_token_color(const SynColors *colors, SynTokType type);
 
-/* Tokenize code text into an array of SynToken.
+/* Tokenize UTF-8 code text into an array of SynToken.
  * Returns dynamically allocated SynToken array; *outCount receives count.
  * Caller frees with free().
  * If lang is NULL, empty, or unrecognized, smart generic highlighting is applied.
  * If lang is "text", "plain", or "plaintext", no tokens are returned (*outCount = 0).
  */
-SynToken *syntax_highlight(const wchar_t *lang, const wchar_t *text, int textlen, int *outCount);
+SynToken *syntax_highlight(const char *lang, const char *text, int textlen, int *outCount);
 
 #ifdef __cplusplus
 }

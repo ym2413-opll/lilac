@@ -13,14 +13,14 @@ extern "C" {
 
 /* Write a paged Layout as PDF (embedded subset TrueType fonts, images, links, outline).
  * Returns 0 on success; on failure fills err (may be NULL). */
-int pdf_write(const Layout *L, const wchar_t *path, wchar_t *err, int errcap);
+int pdf_write(const Layout *L, const char *path, char *err, int errcap);
 
 /* Write a Doc as DOCX (Office Open XML). Images must be resolved (doc_resolve_images).
  * Returns 0 on success; on failure fills err (may be NULL). */
-int docx_write(Doc *doc, const wchar_t *path, wchar_t *err, int errcap);
+int docx_write(Doc *doc, const char *path, char *err, int errcap);
 
 /* Convenience: lay out doc on A4 pages and write PDF. */
-int export_pdf(Doc *doc, const wchar_t *path, wchar_t *err, int errcap);
+int export_pdf(Doc *doc, const char *path, char *err, int errcap);
 
 #ifdef __cplusplus
 }

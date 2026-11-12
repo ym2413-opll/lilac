@@ -1,5 +1,6 @@
 /*
  * image.h - image loading (via Windows Imaging Component, part of Windows).
+ * All image keys/paths/URLs are UTF-8 internally.
  */
 #ifndef MV_IMAGE_H
 #define MV_IMAGE_H
@@ -15,7 +16,7 @@ typedef enum ImageFormat {
 } ImageFormat;
 
 typedef struct Image {
-    wchar_t  *key;      /* resolved absolute path or URL */
+    char     *key;      /* resolved absolute path or URL (UTF-8) */
     int       w, h;     /* pixel size (0 if not loaded) */
     uint32_t *pixels;   /* w*h BGRA, straight (non-premultiplied) alpha; NULL if failed/pending */
     int       hasAlpha; /* any pixel with alpha < 255 */
@@ -34,9 +35,9 @@ typedef struct ImageCache {
 
 ImageCache *imagecache_new(void);
 void        imagecache_free(ImageCache *c);
-/* Get or create an entry for a key (absolute path or URL). Loads local files immediately.
+/* Get or create an entry for a UTF-8 key (absolute path or URL). Loads local files immediately.
  * Remote URLs are downloaded synchronously only if allowRemote, otherwise left pending. */
-Image      *imagecache_get(ImageCache *c, const wchar_t *key, int allowRemote);
+Image      *imagecache_get(ImageCache *c, const char *key, int allowRemote);
 /* Download/decode a pending remote image now (blocking). Returns 0 on success. */
 int         image_fetch_remote(Image *img);
 

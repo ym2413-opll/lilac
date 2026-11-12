@@ -1,0 +1,201 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<DEFECTS>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+      <FILENAME>ws2tcpip.h</FILENAME>
+      <LINE>968</LINE>
+      <COLUMN>0</COLUMN>
+    </SFA>
+    <DEFECTCODE>6101</DEFECTCODE>
+    <DESCRIPTION>Returning uninitialized memory '*Mtu'.  A successful path through the function does not set the named _Out_ parameter. </DESCRIPTION>
+    <FUNCTION>WSAGetIPUserMtu</FUNCTION>
+    <DECORATED>WSAGetIPUserMtu</DECORATED>
+    <FUNCLINE>968</FUNCLINE>
+    <PROBABILITY>1</PROBABILITY>
+    <RANK>3</RANK>
+    <CATEGORY>
+      <RULECATEGORY>mspft</RULECATEGORY>
+    </CATEGORY>
+    <PATH>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>968</LINE>
+        <COLUMN>0</COLUMN>
+        <KEYEVENT>
+          <ID>1</ID>
+          <KIND>declaration</KIND>
+          <IMPORTANCE>Essential</IMPORTANCE>
+          <MESSAGE>'*Mtu' is not initialized</MESSAGE>
+        </KEYEVENT>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>973</LINE>
+        <COLUMN>22</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>974</LINE>
+        <COLUMN>8</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>975</LINE>
+        <COLUMN>8</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>976</LINE>
+        <COLUMN>8</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>978</LINE>
+        <COLUMN>10</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>979</LINE>
+        <COLUMN>14</COLUMN>
+        <KEYEVENT>
+          <ID>2</ID>
+          <KIND>branch</KIND>
+          <IMPORTANCE>Full</IMPORTANCE>
+          <MESSAGE>Skip this branch, (assume 'Error!=((-1))' is false)</MESSAGE>
+        </KEYEVENT>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>994</LINE>
+        <COLUMN>4</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>968</LINE>
+        <COLUMN>0</COLUMN>
+        <KEYEVENT>
+          <ID>3</ID>
+          <KIND>usage</KIND>
+          <IMPORTANCE>Essential</IMPORTANCE>
+          <MESSAGE>'*Mtu' is an _Out_ parameter that may not have been assigned to</MESSAGE>
+        </KEYEVENT>
+      </SFA>
+    </PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+      <FILENAME>ws2tcpip.h</FILENAME>
+      <LINE>1136</LINE>
+      <COLUMN>0</COLUMN>
+    </SFA>
+    <DEFECTCODE>6101</DEFECTCODE>
+    <DESCRIPTION>Returning uninitialized memory '*Enabled'.  A successful path through the function does not set the named _Out_ parameter. </DESCRIPTION>
+    <FUNCTION>WSAGetRecvIPEcn</FUNCTION>
+    <DECORATED>WSAGetRecvIPEcn</DECORATED>
+    <FUNCLINE>1136</FUNCLINE>
+    <PROBABILITY>1</PROBABILITY>
+    <RANK>3</RANK>
+    <CATEGORY>
+      <RULECATEGORY>mspft</RULECATEGORY>
+    </CATEGORY>
+    <PATH>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1136</LINE>
+        <COLUMN>0</COLUMN>
+        <KEYEVENT>
+          <ID>1</ID>
+          <KIND>declaration</KIND>
+          <IMPORTANCE>Essential</IMPORTANCE>
+          <MESSAGE>'*Enabled' is not initialized</MESSAGE>
+        </KEYEVENT>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1141</LINE>
+        <COLUMN>22</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1142</LINE>
+        <COLUMN>8</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1143</LINE>
+        <COLUMN>8</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1144</LINE>
+        <COLUMN>8</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1146</LINE>
+        <COLUMN>10</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1147</LINE>
+        <COLUMN>14</COLUMN>
+        <KEYEVENT>
+          <ID>2</ID>
+          <KIND>branch</KIND>
+          <IMPORTANCE>Full</IMPORTANCE>
+          <MESSAGE>Skip this branch, (assume 'Error!=((-1))' is false)</MESSAGE>
+        </KEYEVENT>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1162</LINE>
+        <COLUMN>4</COLUMN>
+      </SFA>
+      <SFA>
+        <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\um\</FILEPATH>
+        <FILENAME>ws2tcpip.h</FILENAME>
+        <LINE>1136</LINE>
+        <COLUMN>0</COLUMN>
+        <KEYEVENT>
+          <ID>3</ID>
+          <KIND>usage</KIND>
+          <IMPORTANCE>Essential</IMPORTANCE>
+          <MESSAGE>'*Enabled' is an _Out_ parameter that may not have been assigned to</MESSAGE>
+        </KEYEVENT>
+      </SFA>
+    </PATH>
+  </DEFECT>
+  <DEFECT>
+    <SFA>
+      <FILEPATH>C:\Program Files (x86)\Windows Kits\10\include\10.0.26100.0\shared\</FILEPATH>
+      <FILENAME>intsafe.h</FILENAME>
+      <LINE>133</LINE>
+      <COLUMN>0</COLUMN>
+    </SFA>
+    <DEFECTCODE>28253</DEFECTCODE>
+    <DESCRIPTION>Inconsistent annotation for '_umul128': _Param_(3) has 'SAL_post SAL_notref SAL_deref SAL_range(==,__formal(0,parameter0)*__formal(1,parameter1))' on this instance. See &lt;no file&gt;(0). .</DESCRIPTION>
+    <FUNCTION>_umul128</FUNCTION>
+    <DECORATED>_umul128</DECORATED>
+    <FUNCLINE>133</FUNCLINE>
+    <PATH></PATH>
+  </DEFECT>
+</DEFECTS>

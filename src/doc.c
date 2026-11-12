@@ -1,11 +1,13 @@
 /*
- * doc.c - Markdown -> document model (md4c based, GitHub flavoured).
+ * doc.c - Markdown -> document model (md4c based, GitHub flavoured + LaTeX math).
+ * All internal strings are UTF-8 (char *); UTF-16 is used only at Win32 API boundaries.
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdlib.h>
 #include <string.h>
-#include <wctype.h>
+#include <stdio.h>
+#include <ctype.h>
 #include "doc.h"
 #include "image.h"
 #include "../third_party/md4c/md4c.h"
@@ -22,8 +24,8 @@ static Block *block_new(Doc *doc, int type, Block *parent)
     if (parent) {
         if (parent->nkids == parent->capkids) {
             int nc = parent->capkids ? parent->capkids * 2 : 4;
-            Block **nk = (Block **)arena_alloc(&doc->arena, nc * sizeof(Block *));
-            if (parent->nkids) memcpy(nk, parent->kids, parent->nkids * sizeof(Block *));
+            Block **nk = (Block **)arena_alloc(&doc->arena, (size_t)nc * sizeof(Block *));
+            if (parent->nkids) memcpy(nk, parent->kids, (size_t)parent->nkids * sizeof(Block *));
             parent->kids = nk;
             parent->capkids = nc;
         }
@@ -37,8 +39,8 @@ static Run *run_add(Doc *doc, Block *b)
     Run *r;
     if (b->nruns == b->capruns) {
         int nc = b->capruns ? b->capruns * 2 : 8;
-        Run *nr = (Run *)arena_alloc(&doc->arena, nc * sizeof(Run));
-        if (b->nruns) memcpy(nr, b->runs, b->nruns * sizeof(Run));
+        Run *nr = (Run *)arena_alloc(&doc->arena, (size_t)nc * sizeof(Run));
+        if (b->nruns) memcpy(nr, b->runs, (size_t)b->nruns * sizeof(Run));
         b->runs = nr;
         b->capruns = nc;
     }
@@ -48,16 +50,16 @@ static Run *run_add(Doc *doc, Block *b)
     return r;
 }
 
-static int doc_add_link(Doc *doc, const wchar_t *href, int len)
+static int doc_add_link(Doc *doc, const char *href, int len)
 {
     if (doc->nlinks == doc->caplinks) {
         int nc = doc->caplinks ? doc->caplinks * 2 : 16;
-        wchar_t **nl = (wchar_t **)arena_alloc(&doc->arena, nc * sizeof(wchar_t *));
-        if (doc->nlinks) memcpy(nl, doc->links, doc->nlinks * sizeof(wchar_t *));
+        char **nl = (char **)arena_alloc(&doc->arena, (size_t)nc * sizeof(char *));
+        if (doc->nlinks) memcpy(nl, doc->links, (size_t)doc->nlinks * sizeof(char *));
         doc->links = nl;
         doc->caplinks = nc;
     }
-    doc->links[doc->nlinks] = arena_wcsndup(&doc->arena, href ? href : L"", href ? len : 0);
+    doc->links[doc->nlinks] = arena_strndup(&doc->arena, href ? href : "", href ? len : 0);
     return doc->nlinks++;
 }
 
@@ -89,22 +91,22 @@ static const Entity g_entities[] = {
     {"Eacute",0xC9},{"oacute",0xF3},{"uacute",0xFA},{"iacute",0xED},
 };
 
-/* Decode an entity "&...;" (UTF-16 input). Writes up to 2 UTF-16 units to out. Returns count or 0. */
-static int decode_entity_w(const wchar_t *s, int len, wchar_t *out)
+/* Decode an entity "&...;" (UTF-8 input). Writes 1..4 UTF-8 bytes to out. Returns byte count or 0. */
+static int decode_entity_u8(const char *s, int len, char out[4])
 {
-    unsigned cp = 0;
+    uint32_t cp = 0;
     if (len < 3 || s[0] != '&' || s[len - 1] != ';') return 0;
     if (s[1] == '#') {
         int i = 2, hex = 0;
         if (i < len - 1 && (s[i] == 'x' || s[i] == 'X')) { hex = 1; i++; }
         for (; i < len - 1; i++) {
-            wchar_t c = s[i];
+            char c = s[i];
             int d;
             if (c >= '0' && c <= '9') d = c - '0';
             else if (hex && c >= 'a' && c <= 'f') d = c - 'a' + 10;
             else if (hex && c >= 'A' && c <= 'F') d = c - 'A' + 10;
             else return 0;
-            cp = cp * (hex ? 16 : 10) + d;
+            cp = cp * (uint32_t)(hex ? 16 : 10) + (uint32_t)d;
             if (cp > 0x10FFFF) { cp = 0xFFFD; break; }
         }
         if (cp == 0) cp = 0xFFFD;
@@ -112,24 +114,17 @@ static int decode_entity_w(const wchar_t *s, int len, wchar_t *out)
         char name[48];
         int n = len - 2, k;
         if (n <= 0 || n >= (int)sizeof name) return 0;
-        for (k = 0; k < n; k++) name[k] = (char)s[k + 1];
+        memcpy(name, s + 1, (size_t)n);
         name[n] = 0;
         for (k = 0; k < (int)(sizeof g_entities / sizeof g_entities[0]); k++)
             if (!strcmp(g_entities[k].name, name)) { cp = g_entities[k].cp; break; }
         if (!cp) return 0;
     }
-    if (cp >= 0x10000) {
-        cp -= 0x10000;
-        out[0] = (wchar_t)(0xD800 + (cp >> 10));
-        out[1] = (wchar_t)(0xDC00 + (cp & 0x3FF));
-        return 2;
-    }
-    out[0] = (wchar_t)cp;
-    return 1;
+    return utf8_encode(cp, out);
 }
 
-/* Decode all entities in a string into wb. */
-static void decode_entities_into(WBuf *wb, const wchar_t *s, int len)
+/* Decode all entities in a UTF-8 string into b. */
+static void decode_entities_into(Buf *b, const char *s, int len)
 {
     int i = 0;
     while (i < len) {
@@ -137,57 +132,72 @@ static void decode_entities_into(WBuf *wb, const wchar_t *s, int len)
             int j = i + 1;
             while (j < len && j - i < 40 && s[j] != ';' && s[j] != '&' && s[j] != ' ' && s[j] != '<') j++;
             if (j < len && s[j] == ';') {
-                wchar_t out[2];
-                int n = decode_entity_w(s + i, j - i + 1, out);
-                if (n) { wbuf_put(wb, out, n); i = j + 1; continue; }
+                char out[4];
+                int n = decode_entity_u8(s + i, j - i + 1, out);
+                if (n) { buf_put(b, out, (size_t)n); i = j + 1; continue; }
             }
         }
-        wbuf_putc(wb, s[i]);
+        buf_putc(b, s[i]);
         i++;
     }
 }
 
-/* Decode an md4c attribute (with entity substrings) into an arena string. */
-static wchar_t *attr_to_w(Doc *doc, const MD_ATTRIBUTE *a)
+/* Decode an md4c attribute (with entity substrings) into a UTF-8 arena string. */
+static char *attr_to_u8(Doc *doc, const MD_ATTRIBUTE *a)
 {
-    WBuf wb = {0};
-    wchar_t *res;
+    Buf b = {0};
+    char *res;
     unsigned i;
-    if (!a || !a->text || a->size == 0) return arena_wcsndup(&doc->arena, L"", 0);
+    if (!a || !a->text || a->size == 0) return arena_strndup(&doc->arena, "", 0);
     for (i = 0; a->substr_offsets[i] < a->size; i++) {
         MD_OFFSET off = a->substr_offsets[i], end = a->substr_offsets[i + 1];
-        int wl;
-        wchar_t *w = utf8_to_utf16(a->text + off, (int)(end - off), &wl);
+        const char *sub = a->text + off;
+        int slen = (int)(end - off);
         if (a->substr_types[i] == MD_TEXT_ENTITY) {
-            wchar_t out[2];
-            int n = decode_entity_w(w, wl, out);
-            if (n) wbuf_put(&wb, out, n); else wbuf_put(&wb, w, wl);
+            char out[4];
+            int n = decode_entity_u8(sub, slen, out);
+            if (n) buf_put(&b, out, (size_t)n);
+            else buf_put(&b, sub, (size_t)slen);
         } else if (a->substr_types[i] == MD_TEXT_NULLCHAR) {
-            wbuf_putc(&wb, 0xFFFD);
+            buf_put_cp(&b, 0xFFFD);
         } else {
-            wbuf_put(&wb, w, wl);
+            buf_put(&b, sub, (size_t)slen);
         }
-        free(w);
     }
-    res = arena_wcsndup(&doc->arena, wb.p ? wb.p : L"", wb.n);
-    wbuf_free(&wb);
+    res = arena_strndup(&doc->arena, b.p ? b.p : "", (int)b.n);
+    buf_free(&b);
     return res;
 }
 
 /* ------------------------------------------------------------------------- */
-/* Minimal HTML tag parsing                                                   */
+/* Minimal HTML tag parsing (UTF-8)                                           */
 /* ------------------------------------------------------------------------- */
 
 typedef struct Tag {
-    wchar_t name[16];
-    int     closing;
-    int     selfclose;
-    const wchar_t *attrs;   /* raw attribute text */
-    int     attrlen;
+    char        name[16];
+    int         closing;
+    int         selfclose;
+    const char *attrs;      /* raw attribute text */
+    int         attrlen;
 } Tag;
 
+static int is_ascii_space(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f' || c == '\v';
+}
+
+static int is_ascii_alpha(char c)
+{
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+static int is_ascii_alnum(char c)
+{
+    return is_ascii_alpha(c) || (c >= '0' && c <= '9');
+}
+
 /* Parse "<name attr...>" at s (s[0]=='<'). Returns length consumed or 0 if not a tag. */
-static int parse_tag(const wchar_t *s, int len, Tag *t)
+static int parse_tag(const char *s, int len, Tag *t)
 {
     int i = 1, n = 0;
     memset(t, 0, sizeof *t);
@@ -205,15 +215,15 @@ static int parse_tag(const wchar_t *s, int len, Tag *t)
         return i < len ? i + 1 : len;
     }
     if (s[i] == '/') { t->closing = 1; i++; }
-    if (i >= len || !iswalpha(s[i])) return 0;
-    while (i < len && (iswalnum(s[i]) || s[i] == '-' || s[i] == ':')) {
-        if (n < 15) t->name[n++] = (wchar_t)towlower(s[i]);
+    if (i >= len || !is_ascii_alpha(s[i])) return 0;
+    while (i < len && (is_ascii_alnum(s[i]) || s[i] == '-' || s[i] == ':')) {
+        if (n < 15) t->name[n++] = (char)tolower((unsigned char)s[i]);
         i++;
     }
     t->name[n] = 0;
     t->attrs = s + i;
     {
-        wchar_t q = 0;
+        char q = 0;
         int st = i;
         for (; i < len; i++) {
             if (q) { if (s[i] == q) q = 0; continue; }
@@ -227,51 +237,51 @@ static int parse_tag(const wchar_t *s, int len, Tag *t)
     }
 }
 
-/* Get attribute value (malloc()ed, entity-decoded) or NULL. */
-static wchar_t *tag_attr(const Tag *t, const wchar_t *name)
+/* Get attribute value (malloc()ed UTF-8, entity-decoded) or NULL. */
+static char *tag_attr(const Tag *t, const char *name)
 {
-    const wchar_t *s = t->attrs;
-    int len = t->attrlen, i = 0, nl = (int)wcslen(name);
+    const char *s = t->attrs;
+    int len = t->attrlen, i = 0, nl = (int)strlen(name);
     while (i < len) {
         int ks, ke, vs, ve;
-        while (i < len && iswspace(s[i])) i++;
+        while (i < len && is_ascii_space(s[i])) i++;
         ks = i;
-        while (i < len && !iswspace(s[i]) && s[i] != '=' && s[i] != '>') i++;
+        while (i < len && !is_ascii_space(s[i]) && s[i] != '=' && s[i] != '>') i++;
         ke = i;
-        while (i < len && iswspace(s[i])) i++;
+        while (i < len && is_ascii_space(s[i])) i++;
         vs = ve = i;
         if (i < len && s[i] == '=') {
             i++;
-            while (i < len && iswspace(s[i])) i++;
+            while (i < len && is_ascii_space(s[i])) i++;
             if (i < len && (s[i] == '"' || s[i] == '\'')) {
-                wchar_t q = s[i++];
+                char q = s[i++];
                 vs = i;
                 while (i < len && s[i] != q) i++;
                 ve = i;
                 if (i < len) i++;
             } else {
                 vs = i;
-                while (i < len && !iswspace(s[i])) i++;
+                while (i < len && !is_ascii_space(s[i])) i++;
                 ve = i;
             }
         }
-        if (ke - ks == nl && !_wcsnicmp(s + ks, name, nl)) {
-            WBuf wb = {0};
-            decode_entities_into(&wb, s + vs, ve - vs);
-            if (!wb.p) wbuf_put(&wb, L"", 0);
-            return wb.p;
+        if (ke - ks == nl && !ascii_nicmp(s + ks, name, (size_t)nl)) {
+            Buf b = {0};
+            decode_entities_into(&b, s + vs, ve - vs);
+            if (!b.p) buf_put(&b, "", 0);
+            return b.p;
         }
         if (ke == ks) i++;
     }
     return NULL;
 }
 
-static float parse_px(const wchar_t *v)
+static float parse_px(const char *v)
 {
     float f;
     if (!v) return 0;
-    f = (float)_wtof(v);
-    if (wcschr(v, '%')) return 0; /* percentages unsupported -> natural size */
+    f = (float)atof(v);
+    if (strchr(v, '%')) return 0; /* percentages unsupported -> natural size */
     return f > 0 ? f : 0;
 }
 
@@ -293,10 +303,12 @@ typedef struct PState {
     Run     *imgRun;
     Block   *imgBlock;
     int      imgRunIndex;
-    WBuf     alt;
+    Buf      alt;
     int      inHead;
     int      inCode, inHtml;
-    WBuf     raw;       /* code / html block text */
+    int      inMath;    /* 1 = inline math, 2 = display math */
+    Buf      mathBuf;
+    Buf      raw;       /* code / html block text (UTF-8) */
     Block   *rawBlock;
 } PState;
 
@@ -333,40 +345,40 @@ static Block *ensure_inline(PState *ps)
     return ps->inl;
 }
 
-static void add_text(PState *ps, const wchar_t *w, int len, unsigned extraStyle)
+static void add_text(PState *ps, const char *s, int len, unsigned extraStyle)
 {
     Block *b;
     Run *r;
     if (len <= 0) return;
-    if (ps->imgDepth > 0) { wbuf_put(&ps->alt, w, len); return; }
+    if (ps->imgDepth > 0) { buf_put(&ps->alt, s, (size_t)len); return; }
     b = ensure_inline(ps);
     r = run_add(ps->doc, b);
     r->type = RN_TEXT;
     r->style = cur_style(ps) | extraStyle;
     r->link = ps->nlink > 0 ? ps->linkStack[ps->nlink - 1] : -1;
-    r->text = arena_wcsndup(&ps->doc->arena, w, len);
+    r->text = arena_strndup(&ps->doc->arena, s, len);
     r->len = len;
 }
 
 static void add_break(PState *ps)
 {
     Run *r;
-    if (ps->imgDepth > 0) { wbuf_putc(&ps->alt, ' '); return; }
+    if (ps->imgDepth > 0) { buf_putc(&ps->alt, ' '); return; }
     r = run_add(ps->doc, ensure_inline(ps));
     r->type = RN_BREAK;
     r->style = cur_style(ps);
 }
 
-static Run *add_image(PState *ps, const wchar_t *src, const wchar_t *alt, const wchar_t *title, float w, float h)
+static Run *add_image(PState *ps, const char *src, const char *alt, const char *title, float w, float h)
 {
     Run *r = run_add(ps->doc, ensure_inline(ps));
     r->type = RN_IMAGE;
     r->style = cur_style(ps);
     r->link = ps->nlink > 0 ? ps->linkStack[ps->nlink - 1] : -1;
-    r->src = arena_wcsndup(&ps->doc->arena, src ? src : L"", -1);
-    r->text = arena_wcsndup(&ps->doc->arena, alt ? alt : L"", -1);
-    r->len = (int)wcslen(r->text);
-    r->title = title ? arena_wcsndup(&ps->doc->arena, title, -1) : NULL;
+    r->src = arena_strndup(&ps->doc->arena, src ? src : "", -1);
+    r->text = arena_strndup(&ps->doc->arena, alt ? alt : "", -1);
+    r->len = (int)strlen(r->text);
+    r->title = title ? arena_strndup(&ps->doc->arena, title, -1) : NULL;
     r->width = w;
     r->height = h;
     return r;
@@ -386,37 +398,37 @@ static void link_pop(PState *ps)
 /* Inline formatting tags shared by inline HTML and HTML blocks. Returns 1 if handled. */
 static int handle_inline_tag(PState *ps, const Tag *t)
 {
-    static const struct { const wchar_t *name; unsigned bit; } map[] = {
-        {L"b", ST_BOLD}, {L"strong", ST_BOLD}, {L"i", ST_ITALIC}, {L"em", ST_ITALIC},
-        {L"cite", ST_ITALIC}, {L"var", ST_ITALIC}, {L"dfn", ST_ITALIC},
-        {L"u", ST_UNDERLINE}, {L"ins", ST_UNDERLINE}, {L"s", ST_STRIKE}, {L"del", ST_STRIKE},
-        {L"strike", ST_STRIKE}, {L"code", ST_CODE}, {L"tt", ST_CODE}, {L"samp", ST_CODE},
-        {L"kbd", ST_KBD}, {L"sup", ST_SUP}, {L"sub", ST_SUB}, {L"mark", ST_MARK},
+    static const struct { const char *name; unsigned bit; } map[] = {
+        {"b", ST_BOLD}, {"strong", ST_BOLD}, {"i", ST_ITALIC}, {"em", ST_ITALIC},
+        {"cite", ST_ITALIC}, {"var", ST_ITALIC}, {"dfn", ST_ITALIC},
+        {"u", ST_UNDERLINE}, {"ins", ST_UNDERLINE}, {"s", ST_STRIKE}, {"del", ST_STRIKE},
+        {"strike", ST_STRIKE}, {"code", ST_CODE}, {"tt", ST_CODE}, {"samp", ST_CODE},
+        {"kbd", ST_KBD}, {"sup", ST_SUP}, {"sub", ST_SUB}, {"mark", ST_MARK},
     };
     int i;
-    if (!wcscmp(t->name, L"br")) { add_break(ps); return 1; }
+    if (!strcmp(t->name, "br")) { add_break(ps); return 1; }
     for (i = 0; i < (int)(sizeof map / sizeof map[0]); i++) {
-        if (!wcscmp(t->name, map[i].name)) {
+        if (!strcmp(t->name, map[i].name)) {
             if (!t->selfclose) style_push(ps, map[i].bit, t->closing ? -1 : 1);
             return 1;
         }
     }
-    if (!wcscmp(t->name, L"a")) {
+    if (!strcmp(t->name, "a")) {
         if (t->closing) {
             if (ps->htmlLinkDepth > 0) { ps->htmlLinkDepth--; link_pop(ps); }
         } else {
-            wchar_t *href = tag_attr(t, L"href");
+            char *href = tag_attr(t, "href");
             if (href) {
-                link_push(ps, doc_add_link(ps->doc, href, (int)wcslen(href)));
+                link_push(ps, doc_add_link(ps->doc, href, (int)strlen(href)));
                 ps->htmlLinkDepth++;
                 free(href);
             }
         }
         return 1;
     }
-    if (!wcscmp(t->name, L"img") && !t->closing) {
-        wchar_t *src = tag_attr(t, L"src"), *alt = tag_attr(t, L"alt"), *title = tag_attr(t, L"title");
-        wchar_t *w = tag_attr(t, L"width"), *h = tag_attr(t, L"height");
+    if (!strcmp(t->name, "img") && !t->closing) {
+        char *src = tag_attr(t, "src"), *alt = tag_attr(t, "alt"), *title = tag_attr(t, "title");
+        char *w = tag_attr(t, "width"), *h = tag_attr(t, "height");
         if (src) add_image(ps, src, alt, title, parse_px(w), parse_px(h));
         free(src); free(alt); free(title); free(w); free(h);
         return 1;
@@ -426,16 +438,16 @@ static int handle_inline_tag(PState *ps, const Tag *t)
 
 /* Raw HTML block -> blocks. A pragmatic subset: paragraphs, headings, alignment,
  * images, links, line breaks, inline formatting, horizontal rules. */
-static void convert_html_block(PState *ps, const wchar_t *s, int len)
+static void convert_html_block(PState *ps, const char *s, int len)
 {
     Block *container = ps->cur;
     int align = AL_DEFAULT;
     int alignStack[32], nalign = 0;
     int i = 0, skip = 0;
     int lastSpace = 1;
-    WBuf text = {0};
+    Buf text = {0};
 
-#define FLUSH_TEXT() do { if (text.n) { add_text(ps, text.p, text.n, 0); text.n = 0; } } while (0)
+#define FLUSH_TEXT() do { if (text.n) { add_text(ps, text.p, (int)text.n, 0); text.n = 0; } } while (0)
 #define END_PARA() do { FLUSH_TEXT(); ps->inl = NULL; lastSpace = 1; } while (0)
 
     ps->inl = NULL;
@@ -446,25 +458,25 @@ static void convert_html_block(PState *ps, const wchar_t *s, int len)
             if (n > 0) {
                 i += n;
                 if (t.name[0] == '!') continue;
-                if (!wcscmp(t.name, L"script") || !wcscmp(t.name, L"style")) { skip = !t.closing; continue; }
+                if (!strcmp(t.name, "script") || !strcmp(t.name, "style")) { skip = !t.closing; continue; }
                 if (skip) continue;
-                if (!wcscmp(t.name, L"p") || !wcscmp(t.name, L"div") || !wcscmp(t.name, L"center") ||
-                    !wcscmp(t.name, L"details") || !wcscmp(t.name, L"section") || !wcscmp(t.name, L"article") ||
-                    !wcscmp(t.name, L"header") || !wcscmp(t.name, L"footer") || !wcscmp(t.name, L"figure") ||
-                    !wcscmp(t.name, L"blockquote") || !wcscmp(t.name, L"table") || !wcscmp(t.name, L"tr") ||
-                    !wcscmp(t.name, L"ul") || !wcscmp(t.name, L"ol") || !wcscmp(t.name, L"pre") ||
-                    !wcscmp(t.name, L"figcaption") || !wcscmp(t.name, L"dl") || !wcscmp(t.name, L"dd") ||
-                    !wcscmp(t.name, L"dt") || !wcscmp(t.name, L"picture")) {
+                if (!strcmp(t.name, "p") || !strcmp(t.name, "div") || !strcmp(t.name, "center") ||
+                    !strcmp(t.name, "details") || !strcmp(t.name, "section") || !strcmp(t.name, "article") ||
+                    !strcmp(t.name, "header") || !strcmp(t.name, "footer") || !strcmp(t.name, "figure") ||
+                    !strcmp(t.name, "blockquote") || !strcmp(t.name, "table") || !strcmp(t.name, "tr") ||
+                    !strcmp(t.name, "ul") || !strcmp(t.name, "ol") || !strcmp(t.name, "pre") ||
+                    !strcmp(t.name, "figcaption") || !strcmp(t.name, "dl") || !strcmp(t.name, "dd") ||
+                    !strcmp(t.name, "dt") || !strcmp(t.name, "picture")) {
                     END_PARA();
                     if (!t.selfclose) {
                         if (!t.closing) {
-                            wchar_t *a = tag_attr(&t, L"align");
+                            char *a = tag_attr(&t, "align");
                             int na = align;
-                            if (!wcscmp(t.name, L"center")) na = AL_CENTER;
+                            if (!strcmp(t.name, "center")) na = AL_CENTER;
                             if (a) {
-                                if (!_wcsicmp(a, L"center") || !_wcsicmp(a, L"middle")) na = AL_CENTER;
-                                else if (!_wcsicmp(a, L"right")) na = AL_RIGHT;
-                                else if (!_wcsicmp(a, L"left")) na = AL_LEFT;
+                                if (!ascii_icmp(a, "center") || !ascii_icmp(a, "middle")) na = AL_CENTER;
+                                else if (!ascii_icmp(a, "right")) na = AL_RIGHT;
+                                else if (!ascii_icmp(a, "left")) na = AL_LEFT;
                                 free(a);
                             }
                             if (nalign < 32) alignStack[nalign] = align;
@@ -480,47 +492,47 @@ static void convert_html_block(PState *ps, const wchar_t *s, int len)
                 if (t.name[0] == 'h' && t.name[1] >= '1' && t.name[1] <= '6' && !t.name[2]) {
                     END_PARA();
                     if (!t.closing) {
-                        wchar_t *a = tag_attr(&t, L"align");
+                        char *a = tag_attr(&t, "align");
                         Block *h = block_new(ps->doc, BK_HEADING, container);
                         h->level = t.name[1] - '0';
                         h->align = align;
                         if (a) {
-                            if (!_wcsicmp(a, L"center")) h->align = AL_CENTER;
-                            else if (!_wcsicmp(a, L"right")) h->align = AL_RIGHT;
+                            if (!ascii_icmp(a, "center")) h->align = AL_CENTER;
+                            else if (!ascii_icmp(a, "right")) h->align = AL_RIGHT;
                             free(a);
                         }
                         ps->inl = h;
                     }
                     continue;
                 }
-                if (!wcscmp(t.name, L"hr")) {
+                if (!strcmp(t.name, "hr")) {
                     END_PARA();
                     block_new(ps->doc, BK_HR, container);
                     continue;
                 }
-                if (!wcscmp(t.name, L"summary")) {
+                if (!strcmp(t.name, "summary")) {
                     if (!t.closing) { END_PARA(); style_push(ps, ST_BOLD, 1); }
                     else { FLUSH_TEXT(); style_push(ps, ST_BOLD, -1); END_PARA(); }
                     continue;
                 }
-                if (!wcscmp(t.name, L"li")) {
+                if (!strcmp(t.name, "li")) {
                     END_PARA();
-                    if (!t.closing) { text.n = 0; wbuf_put(&text, L"\x2022 ", 2); }
+                    if (!t.closing) { text.n = 0; buf_puts(&text, "\xE2\x80\xA2 "); }
                     continue;
                 }
-                if (!wcscmp(t.name, L"td") || !wcscmp(t.name, L"th")) {
-                    if (t.closing) { wbuf_putc(&text, ' '); lastSpace = 1; }
+                if (!strcmp(t.name, "td") || !strcmp(t.name, "th")) {
+                    if (t.closing) { buf_putc(&text, ' '); lastSpace = 1; }
                     continue;
                 }
                 FLUSH_TEXT();
-                if (!ps->inl && (!wcscmp(t.name, L"img") || !wcscmp(t.name, L"br"))) {
+                if (!ps->inl && (!strcmp(t.name, "img") || !strcmp(t.name, "br"))) {
                     Block *p = block_new(ps->doc, BK_PARAGRAPH, container);
                     p->align = align;
                     ps->inl = p;
                 }
                 if (handle_inline_tag(ps, &t)) {
-                    if (!wcscmp(t.name, L"br")) lastSpace = 1;
-                    else if (!wcscmp(t.name, L"img")) lastSpace = 0;
+                    if (!strcmp(t.name, "br")) lastSpace = 1;
+                    else if (!strcmp(t.name, "img")) lastSpace = 0;
                 }
                 continue;
             }
@@ -528,16 +540,16 @@ static void convert_html_block(PState *ps, const wchar_t *s, int len)
         if (skip) { i++; continue; }
         /* text */
         {
-            wchar_t c = s[i];
+            char c = s[i];
             if (c == '&') {
                 int j = i + 1;
                 while (j < len && j - i < 40 && s[j] != ';' && s[j] != '&' && s[j] != ' ' && s[j] != '<') j++;
                 if (j < len && s[j] == ';') {
-                    wchar_t out[2];
-                    int n = decode_entity_w(s + i, j - i + 1, out);
+                    char out[4];
+                    int n = decode_entity_u8(s + i, j - i + 1, out);
                     if (n) {
                         if (!ps->inl) { Block *p = block_new(ps->doc, BK_PARAGRAPH, container); p->align = align; ps->inl = p; }
-                        wbuf_put(&text, out, n);
+                        buf_put(&text, out, (size_t)n);
                         lastSpace = 0;
                         i = j + 1;
                         continue;
@@ -545,17 +557,17 @@ static void convert_html_block(PState *ps, const wchar_t *s, int len)
                 }
             }
             if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
-                if (!lastSpace && ps->inl) { wbuf_putc(&text, ' '); lastSpace = 1; }
+                if (!lastSpace && ps->inl) { buf_putc(&text, ' '); lastSpace = 1; }
             } else {
                 if (!ps->inl) { Block *p = block_new(ps->doc, BK_PARAGRAPH, container); p->align = align; ps->inl = p; }
-                wbuf_putc(&text, c);
+                buf_putc(&text, c);
                 lastSpace = 0;
             }
             i++;
         }
     }
     END_PARA();
-    wbuf_free(&text);
+    buf_free(&text);
 #undef FLUSH_TEXT
 #undef END_PARA
 }
@@ -569,11 +581,11 @@ static void finalize_runs(Doc *doc, Block *b)
 {
     int i, j, n = 0;
     Run *out;
-    WBuf wb = {0};
+    Buf tb = {0};
     int lastSpace = 1;
 
     if (!b->nruns) return;
-    out = (Run *)arena_alloc(&doc->arena, b->nruns * sizeof(Run));
+    out = (Run *)arena_alloc(&doc->arena, (size_t)b->nruns * sizeof(Run));
     for (i = 0; i < b->nruns; ) {
         Run r = b->runs[i];
         if (r.type != RN_TEXT) {
@@ -581,7 +593,8 @@ static void finalize_runs(Doc *doc, Block *b)
             if (r.type == RN_BREAK) {
                 /* trim trailing space before a hard break */
                 if (n >= 2 && out[n - 2].type == RN_TEXT && !(out[n - 2].style & ST_CODE)) {
-                    while (out[n - 2].len > 0 && out[n - 2].text[out[n - 2].len - 1] == ' ') out[n - 2].len--;
+                    while (out[n - 2].len > 0 && out[n - 2].text[out[n - 2].len - 1] == ' ')
+                        out[n - 2].text[--out[n - 2].len] = 0;
                 }
                 lastSpace = 1;
             } else {
@@ -590,13 +603,13 @@ static void finalize_runs(Doc *doc, Block *b)
             i++;
             continue;
         }
-        wb.n = 0;
+        tb.n = 0;
         for (j = i; j < b->nruns && b->runs[j].type == RN_TEXT &&
                     b->runs[j].style == r.style && b->runs[j].link == r.link; j++) {
             const Run *s = &b->runs[j];
             int k;
             for (k = 0; k < s->len; k++) {
-                wchar_t c = s->text[k];
+                char c = s->text[k];
                 if (!(r.style & ST_CODE)) {
                     if (c == '\t' || c == '\n' || c == '\r') c = ' ';
                     if (c == ' ') {
@@ -607,22 +620,22 @@ static void finalize_runs(Doc *doc, Block *b)
                     if (c == '\n' || c == '\r') c = ' ';
                     lastSpace = 0;
                 }
-                wbuf_putc(&wb, c);
+                buf_putc(&tb, c);
             }
         }
-        if (wb.n > 0) {
-            r.text = arena_wcsndup(&doc->arena, wb.p, wb.n);
-            r.len = wb.n;
+        if (tb.n > 0) {
+            r.text = arena_strndup(&doc->arena, tb.p, (int)tb.n);
+            r.len = (int)tb.n;
             out[n++] = r;
         }
         i = j;
     }
-    wbuf_free(&wb);
+    buf_free(&tb);
     /* trim trailing whitespace of the block */
     while (n > 0) {
         Run *l = &out[n - 1];
         if (l->type == RN_TEXT && !(l->style & ST_CODE)) {
-            while (l->len > 0 && l->text[l->len - 1] == ' ') l->len--;
+            while (l->len > 0 && l->text[l->len - 1] == ' ') l->text[--l->len] = 0;
             if (l->len == 0) { n--; continue; }
         } else if (l->type == RN_BREAK) {
             n--;
@@ -633,73 +646,104 @@ static void finalize_runs(Doc *doc, Block *b)
     b->runs = out;
     b->nruns = n;
     b->capruns = n;
+
+    /* Promote a paragraph consisting solely of a display math span ($$...$$ or \[...\])
+     * into a standalone BK_MATH block (unless inside a tight list item). */
+    if (b->type == BK_PARAGRAPH && !b->tight && n == 1 &&
+        out[0].type == RN_MATH && (out[0].style & ST_MATH_DISPLAY)) {
+        b->type = BK_MATH;
+        b->text = out[0].text;
+        b->textlen = out[0].len;
+        b->nruns = 0;
+        b->capruns = 0;
+        b->runs = NULL;
+    }
 }
 
-wchar_t *doc_runs_text(const Run *runs, int nruns)
+char *doc_runs_text(const Run *runs, int nruns)
 {
-    WBuf wb = {0};
+    Buf b = {0};
     int i;
     for (i = 0; i < nruns; i++) {
-        if (runs[i].type == RN_TEXT) wbuf_put(&wb, runs[i].text, runs[i].len);
-        else if (runs[i].type == RN_BREAK) wbuf_putc(&wb, ' ');
-        else if (runs[i].type == RN_IMAGE) wbuf_put(&wb, runs[i].text, runs[i].len);
+        if (runs[i].type == RN_TEXT || runs[i].type == RN_MATH || runs[i].type == RN_IMAGE)
+            buf_put(&b, runs[i].text, (size_t)runs[i].len);
+        else if (runs[i].type == RN_BREAK)
+            buf_putc(&b, ' ');
     }
-    if (!wb.p) wbuf_put(&wb, L"", 0);
-    return wb.p;
+    if (!b.p) buf_put(&b, "", 0);
+    return b.p;
 }
 
-static int is_slug_punct(wchar_t c)
+static int is_slug_punct_cp(uint32_t c)
 {
-    if (c < 0x80) return !(iswalnum(c) || c == '-' || c == '_' || c == ' ');
+    if (c < 0x80) return !(is_ascii_alnum((char)c) || c == '-' || c == '_' || c == ' ');
     if (c >= 0x2000 && c <= 0x206F) return 1;   /* general punctuation */
     if (c >= 0x3000 && c <= 0x303F) return 1;   /* CJK punctuation */
     if (c >= 0xFF01 && c <= 0xFF0F) return 1;   /* fullwidth punctuation */
     if (c == 0xA0) return 0;
-    if (c >= 0xD800 && c <= 0xDFFF) return 1;   /* emoji etc. are dropped by GitHub */
+    if (c >= 0x10000) return 1;                 /* emoji etc. are dropped by GitHub */
     return 0;
 }
 
 static void make_slug(Doc *doc, Block *h)
 {
-    wchar_t *t = doc_runs_text(h->runs, h->nruns);
-    WBuf wb = {0};
-    int i, n, suffix = 0;
-    for (i = 0; t[i]; i++) {
-        wchar_t c = t[i];
-        if (c == ' ' || c == 0xA0) { wbuf_putc(&wb, '-'); continue; }
-        if (is_slug_punct(c)) continue;
-        if (c < 0x80) c = (wchar_t)towlower(c);
-        else { wchar_t tmp[2] = { c, 0 }; CharLowerW(tmp); c = tmp[0]; }
-        wbuf_putc(&wb, c);
+    char *t = doc_runs_text(h->runs, h->nruns);
+    int tlen = (int)strlen(t);
+    Buf b = {0};
+    int i = 0, n, suffix = 0;
+    while (i < tlen) {
+        uint32_t cp = utf8_next(t, tlen, &i);
+        if (cp == ' ' || cp == 0xA0) { buf_putc(&b, '-'); continue; }
+        if (is_slug_punct_cp(cp)) continue;
+        if (cp < 0x80) cp = (uint32_t)tolower((int)cp);
+        else if (cp < 0x10000) {
+            wchar_t tmp[2] = { (wchar_t)cp, 0 };
+            CharLowerW(tmp);
+            cp = (uint32_t)tmp[0];
+        }
+        buf_put_cp(&b, cp);
     }
-    if (!wb.p) wbuf_put(&wb, L"", 0);
-    n = wb.n;
-    /* uniqueness: compare against previous headings (walk whole tree would be costly; keep a simple list) */
+    if (!b.p) buf_put(&b, "", 0);
+    n = (int)b.n;
+    /* uniqueness: compare against previous headings */
     for (;;) {
         int clash = 0;
         Block *stack[64];
         int sp = 0;
-        wchar_t cand[512];
-        if (suffix) swprintf(cand, 512, L"%.*s-%d", n > 480 ? 480 : n, wb.p, suffix);
-        else swprintf(cand, 512, L"%.*s", n > 500 ? 500 : n, wb.p);
+        char cand[512];
+        if (suffix) _snprintf_s(cand, sizeof(cand), _TRUNCATE, "%.*s-%d", n > 480 ? 480 : n, b.p, suffix);
+        else _snprintf_s(cand, sizeof(cand), _TRUNCATE, "%.*s", n > 500 ? 500 : n, b.p);
         stack[sp++] = doc->root;
         while (sp && !clash) {
-            Block *b = stack[--sp];
+            Block *cur = stack[--sp];
             int k;
-            if (b != h && b->type == BK_HEADING && b->anchor && !wcscmp(b->anchor, cand)) clash = 1;
-            for (k = 0; k < b->nkids && sp < 64; k++) stack[sp++] = b->kids[k];
+            if (cur != h && cur->type == BK_HEADING && cur->anchor && !strcmp(cur->anchor, cand)) clash = 1;
+            for (k = 0; k < cur->nkids && sp < 64; k++) stack[sp++] = cur->kids[k];
         }
-        if (!clash) { h->anchor = arena_wcsndup(&doc->arena, cand, -1); break; }
+        if (!clash) { h->anchor = arena_strndup(&doc->arena, cand, -1); break; }
         suffix++;
     }
-    wbuf_free(&wb);
-    if (!doc->title && h->level == 1 && t[0]) doc->title = arena_wcsndup(&doc->arena, t, -1);
+    buf_free(&b);
+    if (!doc->title && h->level == 1 && t[0]) doc->title = arena_strndup(&doc->arena, t, -1);
     free(t);
 }
 
 /* ------------------------------------------------------------------------- */
 /* md4c callbacks                                                             */
 /* ------------------------------------------------------------------------- */
+
+static int is_math_lang(const char *lang)
+{
+    char buf[32];
+    int n = 0;
+    if (!lang) return 0;
+    while (*lang == ' ' || *lang == '\t') lang++;
+    while (*lang && *lang != ' ' && *lang != '\t' && *lang != '{' && *lang != ':' && n < 31) {
+        buf[n++] = (char)tolower((unsigned char)*lang++);
+    }
+    buf[n] = 0;
+    return (!strcmp(buf, "math") || !strcmp(buf, "latex") || !strcmp(buf, "tex") || !strcmp(buf, "katex"));
+}
 
 static int cb_enter_block(MD_BLOCKTYPE type, void *detail, void *ud)
 {
@@ -717,12 +761,12 @@ static int cb_enter_block(MD_BLOCKTYPE type, void *detail, void *ud)
         break;
     case MD_BLOCK_ADMONITION: {
         MD_BLOCK_ADMONITION_DETAIL *d = (MD_BLOCK_ADMONITION_DETAIL *)detail;
-        wchar_t *k = attr_to_w(doc, &d->type);
+        char *k = attr_to_u8(doc, &d->type);
         b = block_new(doc, BK_ALERT, ps->cur);
-        if (!_wcsicmp(k, L"tip")) b->alert = AL_TIP;
-        else if (!_wcsicmp(k, L"important")) b->alert = AL_IMPORTANT;
-        else if (!_wcsicmp(k, L"warning")) b->alert = AL_WARNING;
-        else if (!_wcsicmp(k, L"caution")) b->alert = AL_CAUTION;
+        if (!ascii_icmp(k, "tip")) b->alert = AL_TIP;
+        else if (!ascii_icmp(k, "important")) b->alert = AL_IMPORTANT;
+        else if (!ascii_icmp(k, "warning")) b->alert = AL_WARNING;
+        else if (!ascii_icmp(k, "caution")) b->alert = AL_CAUTION;
         else b->alert = AL_NOTE;
         ps->cur = b;
         break;
@@ -762,7 +806,8 @@ static int cb_enter_block(MD_BLOCKTYPE type, void *detail, void *ud)
     case MD_BLOCK_CODE: {
         MD_BLOCK_CODE_DETAIL *d = (MD_BLOCK_CODE_DETAIL *)detail;
         b = block_new(doc, BK_CODE, ps->cur);
-        if (d->lang.size) b->lang = attr_to_w(doc, &d->lang);
+        if (d->lang.size) b->lang = attr_to_u8(doc, &d->lang);
+        if (is_math_lang(b->lang)) b->type = BK_MATH;
         ps->rawBlock = b;
         ps->inCode = 1;
         ps->raw.n = 0;
@@ -803,11 +848,11 @@ static int cb_enter_block(MD_BLOCKTYPE type, void *detail, void *ud)
         break;
     case MD_BLOCK_FOOTNOTE_DEF: {
         MD_BLOCK_FOOTNOTE_DEF_DETAIL *d = (MD_BLOCK_FOOTNOTE_DEF_DETAIL *)detail;
-        wchar_t tmp[32];
+        char tmp[32];
         b = block_new(doc, BK_FOOTNOTE, ps->cur);
         b->footnote = (int)d->id;
-        swprintf(tmp, 32, L"fn-%u", d->id);
-        b->anchor = arena_wcsndup(&doc->arena, tmp, -1);
+        _snprintf_s(tmp, sizeof(tmp), _TRUNCATE, "fn-%u", d->id);
+        b->anchor = arena_strndup(&doc->arena, tmp, -1);
         ps->cur = b;
         break;
     }
@@ -848,9 +893,9 @@ static int cb_leave_block(MD_BLOCKTYPE type, void *detail, void *ud)
         break;
     case MD_BLOCK_CODE: {
         Block *b = ps->rawBlock;
-        int n = ps->raw.n;
+        int n = (int)ps->raw.n;
         while (n > 0 && (ps->raw.p[n - 1] == '\n' || ps->raw.p[n - 1] == '\r')) n--;
-        b->text = arena_wcsndup(&doc->arena, n ? ps->raw.p : L"", n);
+        b->text = arena_strndup(&doc->arena, n ? ps->raw.p : "", n);
         b->textlen = n;
         ps->inCode = 0;
         ps->rawBlock = NULL;
@@ -860,7 +905,7 @@ static int cb_leave_block(MD_BLOCKTYPE type, void *detail, void *ud)
         int savedCnt[16];
         memcpy(savedCnt, ps->cnt, sizeof savedCnt);
         ps->inHtml = 0;
-        convert_html_block(ps, ps->raw.p ? ps->raw.p : L"", ps->raw.n);
+        convert_html_block(ps, ps->raw.p ? ps->raw.p : "", (int)ps->raw.n);
         /* finalize generated inline blocks */
         {
             int k;
@@ -906,19 +951,27 @@ static int cb_enter_span(MD_SPANTYPE type, void *detail, void *ud)
     case MD_SPAN_SUPERSCRIPT: style_push(ps, ST_SUP, 1); break;
     case MD_SPAN_SUBSCRIPT: style_push(ps, ST_SUB, 1); break;
     case MD_SPAN_MARK: style_push(ps, ST_MARK, 1); break;
+    case MD_SPAN_LATEXMATH:
+        ps->inMath = 1;
+        ps->mathBuf.n = 0;
+        break;
+    case MD_SPAN_LATEXMATH_DISPLAY:
+        ps->inMath = 2;
+        ps->mathBuf.n = 0;
+        break;
     case MD_SPAN_A: {
         MD_SPAN_A_DETAIL *d = (MD_SPAN_A_DETAIL *)detail;
-        wchar_t *href = attr_to_w(doc, &d->href);
-        link_push(ps, doc_add_link(doc, href, (int)wcslen(href)));
+        char *href = attr_to_u8(doc, &d->href);
+        link_push(ps, doc_add_link(doc, href, (int)strlen(href)));
         break;
     }
     case MD_SPAN_IMG: {
         MD_SPAN_IMG_DETAIL *d = (MD_SPAN_IMG_DETAIL *)detail;
         if (ps->imgDepth == 0) {
-            wchar_t *src = attr_to_w(doc, &d->src);
-            wchar_t *title = d->title.size ? attr_to_w(doc, &d->title) : NULL;
+            char *src = attr_to_u8(doc, &d->src);
+            char *title = d->title.size ? attr_to_u8(doc, &d->title) : NULL;
             Block *b = ensure_inline(ps);
-            add_image(ps, src, L"", title, 0, 0);
+            add_image(ps, src, "", title, 0, 0);
             ps->imgBlock = b;
             ps->imgRunIndex = b->nruns - 1;
             ps->alt.n = 0;
@@ -928,24 +981,24 @@ static int cb_enter_span(MD_SPANTYPE type, void *detail, void *ud)
     }
     case MD_SPAN_FOOTNOTE_REF: {
         MD_SPAN_FOOTNOTE_REF_DETAIL *d = (MD_SPAN_FOOTNOTE_REF_DETAIL *)detail;
-        wchar_t lbl[24], href[32];
+        char lbl[24], href[32];
         Run *r;
         if (ps->imgDepth > 0) break;
-        swprintf(lbl, 24, L"%u", d->id);
-        swprintf(href, 32, L"#fn-%u", d->id);
+        _snprintf_s(lbl, sizeof(lbl), _TRUNCATE, "%u", d->id);
+        _snprintf_s(href, sizeof(href), _TRUNCATE, "#fn-%u", d->id);
         r = run_add(doc, ensure_inline(ps));
         r->type = RN_FOOTREF;
         r->style = cur_style(ps) | ST_SUP | ST_LINK;
-        r->link = doc_add_link(doc, href, (int)wcslen(href));
-        r->text = arena_wcsndup(&doc->arena, lbl, -1);
-        r->len = (int)wcslen(lbl);
+        r->link = doc_add_link(doc, href, (int)strlen(href));
+        r->text = arena_strndup(&doc->arena, lbl, -1);
+        r->len = (int)strlen(lbl);
         r->footnote = (int)d->id;
         break;
     }
     case MD_SPAN_WIKILINK: {
         MD_SPAN_WIKILINK_DETAIL *d = (MD_SPAN_WIKILINK_DETAIL *)detail;
-        wchar_t *t = attr_to_w(doc, &d->target);
-        link_push(ps, doc_add_link(doc, t, (int)wcslen(t)));
+        char *t = attr_to_u8(doc, &d->target);
+        link_push(ps, doc_add_link(doc, t, (int)strlen(t)));
         break;
     }
     default: break;
@@ -966,13 +1019,33 @@ static int cb_leave_span(MD_SPANTYPE type, void *detail, void *ud)
     case MD_SPAN_SUPERSCRIPT: style_push(ps, ST_SUP, -1); break;
     case MD_SPAN_SUBSCRIPT: style_push(ps, ST_SUB, -1); break;
     case MD_SPAN_MARK: style_push(ps, ST_MARK, -1); break;
+    case MD_SPAN_LATEXMATH:
+    case MD_SPAN_LATEXMATH_DISPLAY:
+        if (ps->inMath) {
+            const char *s = ps->mathBuf.p ? ps->mathBuf.p : "";
+            int len = (int)ps->mathBuf.n;
+            while (len > 0 && (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n')) { s++; len--; }
+            while (len > 0 && (s[len - 1] == ' ' || s[len - 1] == '\t' || s[len - 1] == '\r' || s[len - 1] == '\n')) len--;
+            if (ps->imgDepth > 0) {
+                buf_put(&ps->alt, s, (size_t)len);
+            } else if (len > 0) {
+                Run *r = run_add(ps->doc, ensure_inline(ps));
+                r->type = RN_MATH;
+                r->style = cur_style(ps) | (ps->inMath == 2 ? ST_MATH_DISPLAY : 0);
+                r->link = ps->nlink > 0 ? ps->linkStack[ps->nlink - 1] : -1;
+                r->text = arena_strndup(&ps->doc->arena, s, len);
+                r->len = len;
+            }
+            ps->inMath = 0;
+        }
+        break;
     case MD_SPAN_A: case MD_SPAN_WIKILINK: link_pop(ps); break;
     case MD_SPAN_IMG:
         ps->imgDepth--;
         if (ps->imgDepth == 0 && ps->imgBlock) {
             Run *r = &ps->imgBlock->runs[ps->imgRunIndex];
-            r->text = arena_wcsndup(&ps->doc->arena, ps->alt.p ? ps->alt.p : L"", ps->alt.n);
-            r->len = ps->alt.n;
+            r->text = arena_strndup(&ps->doc->arena, ps->alt.p ? ps->alt.p : "", (int)ps->alt.n);
+            r->len = (int)ps->alt.n;
             ps->imgBlock = NULL;
         }
         break;
@@ -984,14 +1057,16 @@ static int cb_leave_span(MD_SPANTYPE type, void *detail, void *ud)
 static int cb_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *ud)
 {
     PState *ps = (PState *)ud;
-    int wl;
-    wchar_t *w;
 
     if (ps->inCode || ps->inHtml) {
-        w = utf8_to_utf16(text, (int)size, &wl);
-        if (type == MD_TEXT_NULLCHAR) wbuf_putc(&ps->raw, 0xFFFD);
-        else wbuf_put(&ps->raw, w, wl);
-        free(w);
+        if (type == MD_TEXT_NULLCHAR) buf_put_cp(&ps->raw, 0xFFFD);
+        else buf_put(&ps->raw, text, (size_t)size);
+        return 0;
+    }
+    if (ps->inMath) {
+        if (type == MD_TEXT_NULLCHAR) buf_put_cp(&ps->mathBuf, 0xFFFD);
+        else if (type == MD_TEXT_BR || type == MD_TEXT_SOFTBR) buf_putc(&ps->mathBuf, '\n');
+        else buf_put(&ps->mathBuf, text, (size_t)size);
         return 0;
     }
     switch (type) {
@@ -999,51 +1074,365 @@ static int cb_text(MD_TEXTTYPE type, const MD_CHAR *text, MD_SIZE size, void *ud
         add_break(ps);
         return 0;
     case MD_TEXT_SOFTBR:
-        add_text(ps, L" ", 1, 0);
+        add_text(ps, " ", 1, 0);
         return 0;
     case MD_TEXT_NULLCHAR:
-        add_text(ps, L"\xFFFD", 1, 0);
+        add_text(ps, "\xEF\xBF\xBD", 3, 0);
         return 0;
-    default:
-        break;
-    }
-    w = utf8_to_utf16(text, (int)size, &wl);
-    if (type == MD_TEXT_ENTITY) {
-        wchar_t out[2];
-        int n = decode_entity_w(w, wl, out);
+    case MD_TEXT_ENTITY: {
+        char out[4];
+        int n = decode_entity_u8(text, (int)size, out);
         if (n) add_text(ps, out, n, 0);
-        else add_text(ps, w, wl, 0);
-    } else if (type == MD_TEXT_HTML) {
+        else add_text(ps, text, (int)size, 0);
+        return 0;
+    }
+    case MD_TEXT_HTML: {
         Tag t;
-        if (parse_tag(w, wl, &t) > 0 && t.name[0] != '!') {
+        if (parse_tag(text, (int)size, &t) > 0 && t.name[0] != '!') {
             if (ps->imgDepth == 0) handle_inline_tag(ps, &t);
         }
-    } else {
-        add_text(ps, w, wl, 0);
+        return 0;
     }
-    free(w);
-    return 0;
+    default:
+        add_text(ps, text, (int)size, 0);
+        return 0;
+    }
+}
+
+/* Count unescaped separator pipes '|' outside inline backticks and closed $...$/$$...$$ spans */
+static int scan_table_pipes(const char *s, size_t len)
+{
+    int pipes = 0;
+    size_t k = 0;
+
+    while (k < len) {
+        if (s[k] == '\\' && k + 1 < len) {
+            k += 2;
+            continue;
+        }
+        if (s[k] == '`') {
+            size_t bt = 0, q;
+            while (k + bt < len && s[k + bt] == '`') bt++;
+            q = k + bt;
+            while (q < len) {
+                if (s[q] == '`') {
+                    size_t c = 0;
+                    while (q + c < len && s[q + c] == '`') c++;
+                    if (c == bt) {
+                        k = q + c;
+                        goto next_char;
+                    }
+                    q += c;
+                } else {
+                    q++;
+                }
+            }
+            k += bt;
+            continue;
+        }
+        if (s[k] == '$') {
+            int is_dd = (k + 1 < len && s[k + 1] == '$');
+            size_t dlen = is_dd ? 2 : 1;
+            size_t q = k + dlen;
+            while (q < len) {
+                if (s[q] == '\\' && q + 1 < len) {
+                    q += 2;
+                    continue;
+                }
+                if (s[q] == '$') {
+                    if (is_dd) {
+                        if (q + 1 < len && s[q + 1] == '$') {
+                            k = q + 2;
+                            goto next_char;
+                        }
+                    } else {
+                        k = q + 1;
+                        goto next_char;
+                    }
+                }
+                q++;
+            }
+            k += dlen;
+            continue;
+        }
+        if (s[k] == '|') {
+            pipes++;
+        }
+        k++;
+    next_char:;
+    }
+    return pipes;
+}
+
+/* Check whether trimmed line [0, len) is a GFM table delimiter row (e.g., | :--- | --- |) */
+static int is_table_delim_line(const char *s, size_t len, int *out_pipes, int *out_cols, int *out_has_lead)
+{
+    size_t a = 0, b = len, pos;
+    int pipes = 0, cols = 0, has_dash = 0;
+
+    if (len < 3) return 0;
+    for (pos = 0; pos < len; pos++) {
+        if (s[pos] == '|') pipes++;
+        else if (s[pos] == '-') has_dash = 1;
+    }
+    if (pipes == 0 || !has_dash) return 0;
+
+    if (out_has_lead) *out_has_lead = (s[0] == '|');
+    if (s[a] == '|') a++;
+    if (b > a && s[b - 1] == '|') b--;
+
+    pos = a;
+    while (pos <= b) {
+        size_t seg_end = pos;
+        size_t x, y;
+        while (seg_end < b && s[seg_end] != '|') seg_end++;
+        x = pos;
+        y = seg_end;
+        while (x < y && (s[x] == ' ' || s[x] == '\t')) x++;
+        while (y > x && (s[y - 1] == ' ' || s[y - 1] == '\t')) y--;
+        if (x >= y) return 0;
+        if (s[x] == ':') x++;
+        if (y > x && s[y - 1] == ':') y--;
+        if (x >= y) return 0;
+        while (x < y) {
+            if (s[x] != '-') return 0;
+            x++;
+        }
+        cols++;
+        if (seg_end >= b) break;
+        pos = seg_end + 1;
+    }
+    if (cols < 1) return 0;
+    if (out_pipes) *out_pipes = pipes;
+    if (out_cols) *out_cols = cols;
+    return 1;
+}
+
+static int is_hr_line(const char *s, size_t len)
+{
+    char marker = 0;
+    int cnt = 0;
+    size_t k;
+    for (k = 0; k < len; k++) {
+        if (s[k] == ' ' || s[k] == '\t') continue;
+        if (s[k] == '-' || s[k] == '*' || s[k] == '_') {
+            if (!marker) marker = s[k];
+            else if (s[k] != marker) return 0;
+            cnt++;
+        } else {
+            return 0;
+        }
+    }
+    return cnt >= 3;
+}
+
+static void flush_table_row(Buf *b, Buf *row_buf, int *in_table_row,
+                            int *row_pipes, int *row_lines, int *row_saw_blank)
+{
+    if (row_buf->n > 0) {
+        buf_put(b, row_buf->p, row_buf->n);
+        buf_putc(b, '\n');
+        row_buf->n = 0;
+    }
+    *in_table_row = 0;
+    *row_pipes = 0;
+    *row_lines = 0;
+    *row_saw_blank = 0;
+}
+
+/* Preprocess multi-line display math blocks ($$...$$ and \[...\]) and multi-line pipe tables
+ * outside code fences so internal blank lines or wrapped cell lines keep structure intact. */
+static char *preprocess_display_math(const char *src, size_t len, size_t *out_len)
+{
+    Buf b = {0};
+    Buf row_buf = {0};
+    size_t i = 0;
+    char fence_ch = 0;
+    int fence_len = 0;
+    int in_math_block = 0; /* 1 = $$, 2 = \[ */
+    int prev_line_valid = 0;
+    int in_table = 0;
+    int table_pipes = 0;
+    int table_cols = 0;
+    int table_has_lead = 0;
+    int in_table_row = 0;
+    int row_pipes = 0;
+    int row_lines = 0;
+    int row_saw_blank = 0;
+
+    buf_reserve(&b, len + 16);
+    while (i < len) {
+        size_t ls = i, le, p, te;
+        int is_fence = 0;
+        while (i < len && src[i] != '\n') i++;
+        le = i;
+        if (i < len && src[i] == '\n') i++;
+
+        p = ls;
+        while (p < le && (src[p] == ' ' || src[p] == '\t')) p++;
+        te = le;
+        while (te > p && (src[te - 1] == ' ' || src[te - 1] == '\t' || src[te - 1] == '\r')) te--;
+
+        /* Check code fences (``` or ~~~) when not inside math block */
+        if (!in_math_block && (p < te && (src[p] == '`' || src[p] == '~'))) {
+            char ch = src[p];
+            int cnt = 0;
+            size_t q = p;
+            while (q < te && src[q] == ch) { cnt++; q++; }
+            if (cnt >= 3) {
+                if (!fence_ch) {
+                    fence_ch = ch;
+                    fence_len = cnt;
+                    is_fence = 1;
+                } else if (ch == fence_ch && cnt >= fence_len) {
+                    fence_ch = 0;
+                    fence_len = 0;
+                    is_fence = 1;
+                }
+            }
+        }
+
+        if (fence_ch || is_fence) {
+            if (in_table_row)
+                flush_table_row(&b, &row_buf, &in_table_row, &row_pipes, &row_lines, &row_saw_blank);
+            in_table = 0;
+            prev_line_valid = 0;
+            buf_put(&b, src + ls, i - ls);
+            continue;
+        }
+
+        if (in_table) {
+            int stop_block = (te > p && (src[p] == '#' || src[p] == '>' || is_hr_line(src + p, te - p)));
+            if (in_table_row) {
+                if (stop_block || row_lines >= 32) {
+                    flush_table_row(&b, &row_buf, &in_table_row, &row_pipes, &row_lines, &row_saw_blank);
+                    in_table = 0;
+                    /* fall through to process current line normally */
+                } else if (te == p) {
+                    row_saw_blank = 1;
+                    continue;
+                } else {
+                    int rp = scan_table_pipes(src + p, te - p);
+                    int lead = (src[p] == '|');
+                    if (lead && row_pipes >= table_cols &&
+                        (rp >= 2 || (!row_saw_blank && rp >= 1 && te > p + 1))) {
+                        flush_table_row(&b, &row_buf, &in_table_row, &row_pipes, &row_lines, &row_saw_blank);
+                        /* re-evaluate current line under !in_table_row below */
+                    } else {
+                        if (row_buf.n > 0 && row_buf.p[row_buf.n - 1] != ' ')
+                            buf_putc(&row_buf, ' ');
+                        buf_put(&row_buf, src + p, te - p);
+                        row_pipes += rp;
+                        row_lines++;
+                        row_saw_blank = 0;
+                        if (row_pipes >= table_pipes) {
+                            flush_table_row(&b, &row_buf, &in_table_row, &row_pipes, &row_lines, &row_saw_blank);
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if (in_table && !in_table_row) {
+                if (te == p || stop_block) {
+                    in_table = 0;
+                    prev_line_valid = 0;
+                } else {
+                    int rp = scan_table_pipes(src + p, te - p);
+                    if (rp == 0) {
+                        in_table = 0;
+                        prev_line_valid = 0;
+                    } else if (rp < table_pipes && (table_has_lead || rp < table_cols)) {
+                        row_buf.n = 0;
+                        buf_put(&row_buf, src + p, te - p);
+                        in_table_row = 1;
+                        row_pipes = rp;
+                        row_lines = 1;
+                        row_saw_blank = 0;
+                        continue;
+                    } else {
+                        buf_put(&b, src + ls, i - ls);
+                        prev_line_valid = 0;
+                        continue;
+                    }
+                }
+            }
+        }
+
+        if (in_math_block) {
+            if (te == p) {
+                /* Blank line inside multi-line display math: skip so MD4C keeps the paragraph intact */
+                continue;
+            }
+            /* Check if this line closes the math block */
+            if (in_math_block == 1 && te - p >= 2 &&
+                (!strncmp(src + p, "$$", 2) || !strncmp(src + te - 2, "$$", 2))) {
+                in_math_block = 0;
+            } else if (in_math_block == 2 && te - p >= 2 &&
+                       (!strncmp(src + p, "\\]", 2) || !strncmp(src + te - 2, "\\]", 2))) {
+                in_math_block = 0;
+            }
+            prev_line_valid = 0;
+        } else {
+            /* Check if line opens a multi-line $$ or \[ block */
+            if (te - p >= 2 && !strncmp(src + p, "$$", 2)) {
+                if (te - p == 2 || strncmp(src + te - 2, "$$", 2) != 0) {
+                    in_math_block = 1;
+                }
+                prev_line_valid = 0;
+            } else if (te - p >= 2 && !strncmp(src + p, "\\[", 2)) {
+                if (te - p == 2 || strncmp(src + te - 2, "\\]", 2) != 0) {
+                    in_math_block = 2;
+                }
+                prev_line_valid = 0;
+            } else if (te == p || src[p] == '#' || src[p] == '>' || is_hr_line(src + p, te - p)) {
+                prev_line_valid = 0;
+            } else {
+                int dp = 0, dc = 0, dlead = 0;
+                if (prev_line_valid && is_table_delim_line(src + p, te - p, &dp, &dc, &dlead)) {
+                    in_table = 1;
+                    table_pipes = dp;
+                    table_cols = dc;
+                    table_has_lead = dlead;
+                    prev_line_valid = 0;
+                } else {
+                    prev_line_valid = (scan_table_pipes(src + p, te - p) > 0);
+                }
+            }
+        }
+
+        buf_put(&b, src + ls, i - ls);
+    }
+
+    if (in_table_row)
+        flush_table_row(&b, &row_buf, &in_table_row, &row_pipes, &row_lines, &row_saw_blank);
+    free(row_buf.p);
+
+    *out_len = b.n;
+    return b.p ? b.p : _strdup("");
 }
 
 /* ------------------------------------------------------------------------- */
 /* Public API                                                                 */
 /* ------------------------------------------------------------------------- */
 
-Doc *doc_parse(const char *utf8, size_t len, const wchar_t *path)
+Doc *doc_parse(const char *utf8, size_t len, const char *path)
 {
     Doc *doc = (Doc *)calloc(1, sizeof(Doc));
     PState ps;
     MD_PARSER parser;
     const char *body = utf8;
     size_t bodylen = len;
+    char *pre_body = NULL;
+    size_t pre_len = 0;
     Block *front = NULL;
 
     if (!doc) return NULL;
     doc->root = block_new(doc, BK_DOCUMENT, NULL);
-    if (path) {
-        wchar_t *d = path_dir(path);
-        doc->path = arena_wcsndup(&doc->arena, path, -1);
-        doc->dir = arena_wcsndup(&doc->arena, d, -1);
+    if (path && path[0]) {
+        char *d = path_dir(path);
+        doc->path = arena_strndup(&doc->arena, path, -1);
+        doc->dir = arena_strndup(&doc->arena, d, -1);
         free(d);
     }
     doc->images = imagecache_new();
@@ -1059,17 +1448,13 @@ Doc *doc_parse(const char *utf8, size_t len, const wchar_t *path)
             le = i;
             if (le > ls && utf8[le - 1] == '\r') le--;
             if ((le - ls == 3 && (!strncmp(utf8 + ls, "---", 3) || !strncmp(utf8 + ls, "...", 3)))) {
-                size_t cs = 4;
-                int wl;
-                wchar_t *w;
-                while (cs < ls && (utf8[cs] == '\n' || utf8[cs] == '\r')) cs++;
-                w = utf8_to_utf16(utf8 + cs, (int)(ls - cs), &wl);
-                while (wl > 0 && (w[wl - 1] == '\n' || w[wl - 1] == '\r')) wl--;
+                size_t cs = 4, ce = ls;
+                while (cs < ce && (utf8[cs] == '\n' || utf8[cs] == '\r')) cs++;
+                while (ce > cs && (utf8[ce - 1] == '\n' || utf8[ce - 1] == '\r')) ce--;
                 front = block_new(doc, BK_CODE, doc->root);
-                front->lang = arena_wcsndup(&doc->arena, L"yaml", -1);
-                front->text = arena_wcsndup(&doc->arena, w, wl);
-                front->textlen = wl;
-                free(w);
+                front->lang = arena_strndup(&doc->arena, "yaml", -1);
+                front->text = arena_strndup(&doc->arena, utf8 + cs, (int)(ce - cs));
+                front->textlen = (int)(ce - cs);
                 body = utf8 + (i < len ? i + 1 : len);
                 bodylen = len - (size_t)(body - utf8);
                 break;
@@ -1078,158 +1463,162 @@ Doc *doc_parse(const char *utf8, size_t len, const wchar_t *path)
         }
     }
 
+    pre_body = preprocess_display_math(body, bodylen, &pre_len);
+
     memset(&ps, 0, sizeof ps);
     ps.doc = doc;
     ps.cur = doc->root;
     memset(&parser, 0, sizeof parser);
-    parser.flags = MD_DIALECT_GITHUB | MD_FLAG_UNDERLINE * 0;
+    parser.flags = MD_DIALECT_GITHUB | MD_FLAG_LATEXMATHSPANS;
     parser.enter_block = cb_enter_block;
     parser.leave_block = cb_leave_block;
     parser.enter_span = cb_enter_span;
     parser.leave_span = cb_leave_span;
     parser.text = cb_text;
-    md_parse(body, (MD_SIZE)bodylen, &parser, &ps);
-    wbuf_free(&ps.raw);
-    wbuf_free(&ps.alt);
+    md_parse(pre_body, (MD_SIZE)pre_len, &parser, &ps);
+    free(pre_body);
+    buf_free(&ps.raw);
+    buf_free(&ps.alt);
+    buf_free(&ps.mathBuf);
 
     if (!doc->title) {
-        if (path) {
-            const wchar_t *n = path_name(path);
-            const wchar_t *dot = wcsrchr(n, '.');
-            doc->title = arena_wcsndup(&doc->arena, n, dot ? (int)(dot - n) : -1);
+        if (path && path[0]) {
+            const char *n = path_name(path);
+            const char *dot = strrchr(n, '.');
+            doc->title = arena_strndup(&doc->arena, n, dot ? (int)(dot - n) : -1);
         } else {
-            doc->title = arena_wcsndup(&doc->arena, L"Untitled", -1);
+            doc->title = arena_strndup(&doc->arena, "Untitled", -1);
         }
     }
     return doc;
 }
 
-Doc *doc_load_file(const wchar_t *path)
+Doc *doc_load_file(const char *path)
 {
     uint8_t *data;
     size_t len;
     char *utf8 = NULL;
     int ulen = 0;
     Doc *doc;
-    wchar_t *fullPath = NULL;
-    DWORD fn = GetFullPathNameW(path, 0, NULL, NULL);
+    char *fullPath = path_full(path);
 
-    if (fn > 0) {
-        fullPath = (wchar_t *)malloc(fn * sizeof(wchar_t));
-        if (fullPath) {
-            if (GetFullPathNameW(path, fn, fullPath, NULL) > 0) path = fullPath;
-            else { free(fullPath); fullPath = NULL; }
-        }
+    if (!fullPath || file_read_all(fullPath, &data, &len)) {
+        free(fullPath);
+        return NULL;
     }
-
-    if (file_read_all(path, &data, &len)) {
+    if (len > 0x10000000) {
+        free(data);
         free(fullPath);
         return NULL;
     }
 
     if (len >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
         utf8 = (char *)malloc(len - 3 + 1);
-        memcpy(utf8, data + 3, len - 3);
-        ulen = (int)(len - 3);
-        utf8[ulen] = 0;
+        if (utf8) {
+            memcpy(utf8, data + 3, len - 3);
+            ulen = (int)(len - 3);
+            utf8[ulen] = 0;
+        }
     } else if (len >= 2 && ((data[0] == 0xFF && data[1] == 0xFE) || (data[0] == 0xFE && data[1] == 0xFF))) {
         size_t n = (len - 2) / 2, i;
         wchar_t *w = (wchar_t *)malloc((n + 1) * sizeof(wchar_t));
-        int be = data[0] == 0xFE;
-        for (i = 0; i < n; i++) {
-            uint8_t a = data[2 + i * 2], b = data[3 + i * 2];
-            w[i] = be ? (wchar_t)((a << 8) | b) : (wchar_t)((b << 8) | a);
+        if (w) {
+            int be = data[0] == 0xFE;
+            for (i = 0; i < n; i++) {
+                uint8_t a = data[2 + i * 2], b = data[3 + i * 2];
+                w[i] = be ? (wchar_t)((a << 8) | b) : (wchar_t)((b << 8) | a);
+            }
+            w[n] = 0;
+            utf8 = utf16_to_utf8(w, (int)n, &ulen);
+            free(w);
         }
-        utf8 = utf16_to_utf8(w, (int)n, &ulen);
-        free(w);
     } else if (len == 0 || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)data, (int)len, NULL, 0) > 0) {
         utf8 = (char *)malloc(len + 1);
-        memcpy(utf8, data, len);
-        utf8[len] = 0;
-        ulen = (int)len;
+        if (utf8) {
+            memcpy(utf8, data, len);
+            utf8[len] = 0;
+            ulen = (int)len;
+        }
     } else {
         /* legacy code page (e.g. CP949 for Korean Windows) */
         int wl = MultiByteToWideChar(CP_ACP, 0, (const char *)data, (int)len, NULL, 0);
-        wchar_t *w = (wchar_t *)malloc(((size_t)wl + 1) * sizeof(wchar_t));
-        MultiByteToWideChar(CP_ACP, 0, (const char *)data, (int)len, w, wl);
-        utf8 = utf16_to_utf8(w, wl, &ulen);
-        free(w);
+        if (wl > 0) {
+            wchar_t *w = (wchar_t *)malloc(((size_t)wl + 1) * sizeof(wchar_t));
+            if (w) {
+                if (MultiByteToWideChar(CP_ACP, 0, (const char *)data, (int)len, w, wl) > 0) {
+                    w[wl] = 0;
+                    utf8 = utf16_to_utf8(w, wl, &ulen);
+                }
+                free(w);
+            }
+        }
     }
     free(data);
-    doc = doc_parse(utf8, (size_t)ulen, path);
+    if (!utf8) {
+        free(fullPath);
+        return NULL;
+    }
+    doc = doc_parse(utf8, (size_t)ulen, fullPath);
     free(utf8);
     free(fullPath);
     return doc;
 }
 
-static int is_remote(const wchar_t *s)
+/* Resolve an image src to a UTF-8 image cache key. Returns malloc()ed string or NULL. */
+static char *resolve_image_key(Doc *doc, const char *src)
 {
-    return path_is_remote(s);
-}
-
-/* Resolve an image src to an image cache key. Returns malloc()ed string or NULL. */
-static wchar_t *resolve_image_key(Doc *doc, const wchar_t *src)
-{
-    WBuf wb = {0};
+    Buf b = {0};
     int i, n;
-    wchar_t *res;
-    const wchar_t *p;
+    char *res;
+    const char *p;
 
     if (!src || !src[0]) return NULL;
-    if (!_wcsnicmp(src, L"data:", 5)) return _wcsdup(src);
-    if (!_wcsnicmp(src, L"http://", 7) || !_wcsnicmp(src, L"https://", 8)) return _wcsdup(src);
+    if (!ascii_nicmp(src, "data:", 5)) return _strdup(src);
+    if (!ascii_nicmp(src, "http://", 7) || !ascii_nicmp(src, "https://", 8)) return _strdup(src);
 
     p = src;
-    if (!_wcsnicmp(p, L"file:///", 8)) {
+    if (!ascii_nicmp(p, "file:///", 8)) {
         p += 8;
-    } else if (!_wcsnicmp(p, L"file://localhost/", 17)) {
+    } else if (!ascii_nicmp(p, "file://localhost/", 17)) {
         p += 17;
-    } else if (!_wcsnicmp(p, L"file://", 7)) {
-        return _wcsdup(src);
-    } else if (!_wcsnicmp(p, L"file:", 5)) {
+    } else if (!ascii_nicmp(p, "file://", 7)) {
+        return _strdup(src);
+    } else if (!ascii_nicmp(p, "file:", 5)) {
         p += 5;
     }
 
     /* strip query / fragment, percent-decode (as UTF-8) */
-    n = (int)wcslen(p);
+    n = (int)strlen(p);
     for (i = 0; i < n; i++) if (p[i] == '?' || p[i] == '#') { n = i; break; }
-    {
-        Buf b = {0};
-        char *u = utf16_to_utf8(p, n, NULL);
-        int k, ul = u ? (int)strlen(u) : 0;
-        for (k = 0; k < ul; k++) {
-            if (u[k] == '%' && k + 2 < ul && isxdigit((unsigned char)u[k + 1]) && isxdigit((unsigned char)u[k + 2])) {
-                char hx[3] = { u[k + 1], u[k + 2], 0 };
-                buf_putc(&b, (char)strtol(hx, NULL, 16));
-                k += 2;
-            } else {
-                buf_putc(&b, u[k]);
-            }
+    for (i = 0; i < n; i++) {
+        if (p[i] == '%' && i + 2 < n && isxdigit((unsigned char)p[i + 1]) && isxdigit((unsigned char)p[i + 2])) {
+            char hx[3] = { p[i + 1], p[i + 2], 0 };
+            buf_putc(&b, (char)strtol(hx, NULL, 16));
+            i += 2;
+        } else {
+            buf_putc(&b, p[i]);
         }
-        free(u);
-        {
-            wchar_t *w = utf8_to_utf16(b.p ? b.p : "", (int)b.n, NULL);
-            wbuf_put(&wb, w, -1);
-            free(w);
-        }
-        buf_free(&b);
     }
 
     /* Check decoded path for UNC/remote BEFORE path_join */
-    if (wb.p && path_is_remote(wb.p)) {
-        res = _wcsdup(wb.p);
-        wbuf_free(&wb);
+    if (b.p && path_is_remote(b.p)) {
+        res = _strdup(b.p);
+        buf_free(&b);
         return res;
     }
 
-    res = path_join(doc->dir, wb.p ? wb.p : L"");
-    wbuf_free(&wb);
-
-    /* Also check final resolved path */
-    if (res && path_is_remote(res)) {
-        return res;
+    if (!doc || !doc->dir || !doc->dir[0]) {
+        buf_free(&b);
+        return NULL;
     }
 
+    res = path_join(doc->dir, b.p ? b.p : "");
+    buf_free(&b);
+    /* Prevent arbitrary local file inclusion outside the document directory */
+    if (res && !path_is_within(res, doc->dir)) {
+        free(res);
+        return NULL;
+    }
     return res;
 }
 
@@ -1239,7 +1628,7 @@ static void resolve_block_images(Doc *doc, Block *b, int allowRemote)
     for (i = 0; i < b->nruns; i++) {
         Run *r = &b->runs[i];
         if (r->type == RN_IMAGE) {
-            wchar_t *key = resolve_image_key(doc, r->src);
+            char *key = resolve_image_key(doc, r->src);
             if (key) {
                 r->img = imagecache_get(doc->images, key, allowRemote);
                 free(key);
@@ -1263,13 +1652,13 @@ void doc_free(Doc *doc)
     free(doc);
 }
 
-const wchar_t *doc_alert_title(int kind)
+const char *doc_alert_title(int kind)
 {
     switch (kind) {
-    case AL_TIP: return L"Tip";
-    case AL_IMPORTANT: return L"Important";
-    case AL_WARNING: return L"Warning";
-    case AL_CAUTION: return L"Caution";
-    default: return L"Note";
+    case AL_TIP: return "Tip";
+    case AL_IMPORTANT: return "Important";
+    case AL_WARNING: return "Warning";
+    case AL_CAUTION: return "Caution";
+    default: return "Note";
     }
 }
