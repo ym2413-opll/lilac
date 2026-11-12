@@ -3,4 +3,5 @@ build/obj/
 *.res
 *.exe
 build/Lilac.exe
+*.xml
 
