@@ -1493,6 +1493,152 @@ Doc *doc_parse(const char *utf8, size_t len, const char *path)
     return doc;
 }
 
+/* Decode raw bytes as UTF-8, replacing any malformed byte sequence with U+FFFD. */
+static char *decode_utf8_sanitized(const uint8_t *data, size_t len, int *out_len)
+{
+    Buf b = {0};
+    int pos = 0;
+    int ilen = (int)len;
+
+    buf_reserve(&b, len + 1);
+    while (pos < ilen) {
+        int ascii_start = pos;
+        while (pos < ilen && data[pos] > 0 && data[pos] < 0x80) pos++;
+        if (pos > ascii_start) {
+            buf_put(&b, (const char *)(data + ascii_start), (size_t)(pos - ascii_start));
+        }
+        if (pos < ilen) {
+            if (data[pos] == 0) {
+                buf_put_cp(&b, 0xFFFD);
+                pos++;
+            } else {
+                uint32_t cp = utf8_next((const char *)data, ilen, &pos);
+                buf_put_cp(&b, cp);
+            }
+        }
+    }
+    if (!b.p) buf_put(&b, "", 0);
+    if (out_len) *out_len = (int)b.n;
+    return b.p;
+}
+
+static char *decode_multibyte_cp(UINT cp, DWORD flags, const uint8_t *data, size_t len, int *out_len)
+{
+    int wl;
+    wchar_t *w;
+    char *utf8 = NULL;
+
+    if (len == 0) {
+        if (out_len) *out_len = 0;
+        return _strdup("");
+    }
+    wl = MultiByteToWideChar(cp, flags, (const char *)data, (int)len, NULL, 0);
+    if (wl <= 0) return NULL;
+    w = (wchar_t *)malloc(((size_t)wl + 1) * sizeof(wchar_t));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(cp, flags, (const char *)data, (int)len, w, wl) > 0) {
+        w[wl] = 0;
+        utf8 = utf16_to_utf8(w, wl, out_len);
+    }
+    free(w);
+    return utf8;
+}
+
+static void scan_encoding_stats(const uint8_t *data, size_t len,
+                                size_t *out_u8_2, size_t *out_u8_3, size_t *out_u8_4, size_t *out_bad_u8,
+                                size_t *out_cp949_pairs, size_t *out_cp949_wansung, size_t *out_bad_cp949,
+                                size_t *out_even_nul, size_t *out_odd_nul)
+{
+    size_t i = 0;
+    size_t u8_2 = 0, u8_3 = 0, u8_4 = 0, bad_u8 = 0;
+    size_t cp949_pairs = 0, cp949_wansung = 0, bad_cp949 = 0;
+    size_t even_nul = 0, odd_nul = 0;
+
+    while (i < len) {
+        uint8_t c = data[i];
+        if (c < 0x80) {
+            if (c == 0) {
+                if (i & 1) odd_nul++;
+                else even_nul++;
+            }
+            i++;
+        } else if ((c & 0xE0) == 0xC0) {
+            if (c >= 0xC2 && i + 1 < len && (data[i + 1] & 0xC0) == 0x80) {
+                u8_2++;
+                i += 2;
+            } else {
+                bad_u8++;
+                i++;
+            }
+        } else if ((c & 0xF0) == 0xE0) {
+            if (i + 2 < len && (data[i + 1] & 0xC0) == 0x80 && (data[i + 2] & 0xC0) == 0x80) {
+                uint32_t cp = ((uint32_t)(c & 0x0F) << 12) |
+                              ((uint32_t)(data[i + 1] & 0x3F) << 6) |
+                              (uint32_t)(data[i + 2] & 0x3F);
+                if (cp >= 0x800 && (cp < 0xD800 || cp > 0xDFFF)) {
+                    u8_3++;
+                    i += 3;
+                    continue;
+                }
+            }
+            bad_u8++;
+            i++;
+        } else if ((c & 0xF8) == 0xF0) {
+            if (c <= 0xF4 && i + 3 < len && (data[i + 1] & 0xC0) == 0x80 &&
+                (data[i + 2] & 0xC0) == 0x80 && (data[i + 3] & 0xC0) == 0x80) {
+                uint32_t cp = ((uint32_t)(c & 0x07) << 18) |
+                              ((uint32_t)(data[i + 1] & 0x3F) << 12) |
+                              ((uint32_t)(data[i + 2] & 0x3F) << 6) |
+                              (uint32_t)(data[i + 3] & 0x3F);
+                if (cp >= 0x10000 && cp <= 0x10FFFF) {
+                    u8_4++;
+                    i += 4;
+                    continue;
+                }
+            }
+            bad_u8++;
+            i++;
+        } else {
+            bad_u8++;
+            i++;
+        }
+    }
+
+    i = 0;
+    while (i < len) {
+        uint8_t c = data[i];
+        if (c < 0x80) {
+            i++;
+        } else if (c >= 0x81 && c <= 0xFE && i + 1 < len) {
+            uint8_t t = data[i + 1];
+            int valid_trail = (c >= 0xC7)
+                ? (t >= 0xA1 && t <= 0xFE)
+                : ((t >= 0x41 && t <= 0x5A) || (t >= 0x61 && t <= 0x7A) || (t >= 0x81 && t <= 0xFE));
+            if (valid_trail) {
+                cp949_pairs++;
+                if (c >= 0xA1 && t >= 0xA1) cp949_wansung++;
+                i += 2;
+            } else {
+                bad_cp949++;
+                i++;
+            }
+        } else {
+            bad_cp949++;
+            i++;
+        }
+    }
+
+    *out_u8_2 = u8_2;
+    *out_u8_3 = u8_3;
+    *out_u8_4 = u8_4;
+    *out_bad_u8 = bad_u8;
+    *out_cp949_pairs = cp949_pairs;
+    *out_cp949_wansung = cp949_wansung;
+    *out_bad_cp949 = bad_cp949;
+    *out_even_nul = even_nul;
+    *out_odd_nul = odd_nul;
+}
+
 Doc *doc_load_file(const char *path)
 {
     uint8_t *data;
@@ -1513,12 +1659,7 @@ Doc *doc_load_file(const char *path)
     }
 
     if (len >= 3 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
-        utf8 = (char *)malloc(len - 3 + 1);
-        if (utf8) {
-            memcpy(utf8, data + 3, len - 3);
-            ulen = (int)(len - 3);
-            utf8[ulen] = 0;
-        }
+        utf8 = decode_utf8_sanitized(data + 3, len - 3, &ulen);
     } else if (len >= 2 && ((data[0] == 0xFF && data[1] == 0xFE) || (data[0] == 0xFE && data[1] == 0xFF))) {
         size_t n = (len - 2) / 2, i;
         wchar_t *w = (wchar_t *)malloc((n + 1) * sizeof(wchar_t));
@@ -1532,24 +1673,62 @@ Doc *doc_load_file(const char *path)
             utf8 = utf16_to_utf8(w, (int)n, &ulen);
             free(w);
         }
-    } else if (len == 0 || MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)data, (int)len, NULL, 0) > 0) {
-        utf8 = (char *)malloc(len + 1);
-        if (utf8) {
-            memcpy(utf8, data, len);
-            utf8[len] = 0;
-            ulen = (int)len;
-        }
+    } else if (len == 0) {
+        utf8 = _strdup("");
+        ulen = 0;
     } else {
-        /* legacy code page (e.g. CP949 for Korean Windows) */
-        int wl = MultiByteToWideChar(CP_ACP, 0, (const char *)data, (int)len, NULL, 0);
-        if (wl > 0) {
-            wchar_t *w = (wchar_t *)malloc(((size_t)wl + 1) * sizeof(wchar_t));
+        size_t u8_2, u8_3, u8_4, bad_u8;
+        size_t cp949_pairs, cp949_wansung, bad_cp949;
+        size_t even_nul, odd_nul;
+        scan_encoding_stats(data, len, &u8_2, &u8_3, &u8_4, &bad_u8,
+                            &cp949_pairs, &cp949_wansung, &bad_cp949,
+                            &even_nul, &odd_nul);
+
+        if ((len % 2) == 0 && len >= 4 &&
+            ((odd_nul >= len / 4 && even_nul == 0) || (even_nul >= len / 4 && odd_nul == 0))) {
+            /* UTF-16 without BOM */
+            size_t n = len / 2, i;
+            wchar_t *w = (wchar_t *)malloc((n + 1) * sizeof(wchar_t));
             if (w) {
-                if (MultiByteToWideChar(CP_ACP, 0, (const char *)data, (int)len, w, wl) > 0) {
-                    w[wl] = 0;
-                    utf8 = utf16_to_utf8(w, wl, &ulen);
+                int be = (even_nul >= len / 4 && odd_nul == 0);
+                for (i = 0; i < n; i++) {
+                    uint8_t a = data[i * 2], b = data[i * 2 + 1];
+                    w[i] = be ? (wchar_t)((a << 8) | b) : (wchar_t)((b << 8) | a);
                 }
+                w[n] = 0;
+                utf8 = utf16_to_utf8(w, (int)n, &ulen);
                 free(w);
+            }
+        } else if (bad_u8 == 0 && MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (const char *)data, (int)len, NULL, 0) > 0) {
+            /* Clean UTF-8 (strip embedded NUL if any via decode_utf8_sanitized) */
+            if (even_nul + odd_nul == 0) {
+                utf8 = (char *)malloc(len + 1);
+                if (utf8) {
+                    memcpy(utf8, data, len);
+                    utf8[len] = 0;
+                    ulen = (int)len;
+                }
+            } else {
+                utf8 = decode_utf8_sanitized(data, len, &ulen);
+            }
+        } else {
+            /* Mixed/partially corrupted UTF-8 vs legacy codepage (CP949 / CP_ACP) */
+            int cp949_strict = (MultiByteToWideChar(949, MB_ERR_INVALID_CHARS, (const char *)data, (int)len, NULL, 0) > 0);
+            size_t u8_multibyte_score = u8_3 * 2 + u8_4 * 3;
+            int prefer_sanitized_utf8 = (u8_3 + u8_4 > 0) && (u8_multibyte_score > bad_u8 * 4) &&
+                                        (!cp949_strict || bad_cp949 > bad_u8);
+
+            if (prefer_sanitized_utf8) {
+                utf8 = decode_utf8_sanitized(data, len, &ulen);
+            } else if ((cp949_strict && cp949_wansung > 0) ||
+                       (GetACP() != 949 && cp949_wansung >= 2 && cp949_pairs > bad_cp949 * 4)) {
+                utf8 = decode_multibyte_cp(949, cp949_strict ? MB_ERR_INVALID_CHARS : 0, data, len, &ulen);
+            }
+            if (!utf8) {
+                utf8 = decode_multibyte_cp(CP_ACP, 0, data, len, &ulen);
+            }
+            if (!utf8) {
+                utf8 = decode_utf8_sanitized(data, len, &ulen);
             }
         }
     }

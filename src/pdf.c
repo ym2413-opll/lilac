@@ -204,7 +204,9 @@ static uint32_t calc_table_checksum(const uint8_t *data, uint32_t len)
 static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
 {
     uint8_t *head = NULL, *hhea = NULL, *maxp = NULL, *os2 = NULL, *hmtx = NULL, *loca = NULL, *glyf = NULL;
+    uint8_t *cvt = NULL, *fpgm = NULL, *prep = NULL, *post = NULL;
     uint32_t headLen = 0, hheaLen = 0, maxpLen = 0, os2Len = 0, hmtxLen = 0, locaLen = 0, glyfLen = 0;
+    uint32_t cvtLen = 0, fpgmLen = 0, prepLen = 0, postLen = 0;
     uint32_t *oldLoca = NULL;
     uint32_t *newLoca = NULL;
     uint8_t *newGlyf = NULL;
@@ -220,15 +222,22 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
     hmtx = font_table(f, MV_TAG('h','m','t','x'), &hmtxLen);
     loca = font_table(f, MV_TAG('l','o','c','a'), &locaLen);
     glyf = font_table(f, MV_TAG('g','l','y','f'), &glyfLen);
+    cvt  = font_table(f, MV_TAG('c','v','t',' '), &cvtLen);
+    fpgm = font_table(f, MV_TAG('f','p','g','m'), &fpgmLen);
+    prep = font_table(f, MV_TAG('p','r','e','p'), &prepLen);
+    post = font_table(f, MV_TAG('p','o','s','t'), &postLen);
 
-    if (!head || headLen < 54 || !hhea || !maxp || !hmtx || !loca || !glyf || f->numGlyphs <= 0) {
+    if (!head || headLen < 54 || !hhea || hheaLen < 36 || !maxp || maxpLen < 6 ||
+        !hmtx || !loca || !glyf || f->numGlyphs <= 0) {
         free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+        free(cvt); free(fpgm); free(prep); free(post);
         return NULL;
     }
 
     isLocaLong = (head[51] != 0);
     if (locaLen < (uint32_t)(f->numGlyphs + 1) * (isLocaLong ? 4u : 2u)) {
         free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+        free(cvt); free(fpgm); free(prep); free(post);
         return NULL;
     }
 
@@ -238,6 +247,7 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
     if (!oldLoca || !newLoca || !newGlyf) {
         free(oldLoca); free(newLoca); free(newGlyf);
         free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+        free(cvt); free(fpgm); free(prep); free(post);
         return NULL;
     }
 
@@ -266,6 +276,7 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
                     if (!tmp) {
                         free(oldLoca); free(newLoca); free(newGlyf);
                         free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+                        free(cvt); free(fpgm); free(prep); free(post);
                         return NULL;
                     }
                     newGlyf = tmp;
@@ -284,9 +295,12 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
     {
         uint32_t newLocaLen = (f->numGlyphs + 1) * 4;
         uint8_t *newLocaBytes = (uint8_t *)malloc(newLocaLen);
+        uint8_t post30[32];
+        int hasPost30 = 0;
         if (!newLocaBytes) {
             free(oldLoca); free(newLoca); free(newGlyf);
             free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+            free(cvt); free(fpgm); free(prep); free(post);
             return NULL;
         }
         for (g = 0; g <= f->numGlyphs; g++) {
@@ -302,6 +316,13 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
         /* Clear checkSumAdjustment for recalculation */
         head[8] = head[9] = head[10] = head[11] = 0;
 
+        /* Convert post table to format 3.0 (compact, no glyph names) if available */
+        if (post && postLen >= 32) {
+            memcpy(post30, post, 32);
+            post30[0] = 0x00; post30[1] = 0x03; post30[2] = 0x00; post30[3] = 0x00;
+            hasPost30 = 1;
+        }
+
         /* Write SFNT TrueType container */
         {
             typedef struct TblEntry {
@@ -309,17 +330,22 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
                 const uint8_t *data;
                 uint32_t len;
             } TblEntry;
-            TblEntry tbls[7];
+            TblEntry tbls[12];
             int nTbls = 0, ti;
             uint32_t offset;
+            size_t headOffsetInSfnt = 0;
 
             if (os2) { tbls[nTbls].tag = MV_TAG('O','S','/','2'); tbls[nTbls].data = os2; tbls[nTbls++].len = os2Len; }
+            if (cvt && cvtLen > 0) { tbls[nTbls].tag = MV_TAG('c','v','t',' '); tbls[nTbls].data = cvt; tbls[nTbls++].len = cvtLen; }
+            if (fpgm && fpgmLen > 0) { tbls[nTbls].tag = MV_TAG('f','p','g','m'); tbls[nTbls].data = fpgm; tbls[nTbls++].len = fpgmLen; }
             tbls[nTbls].tag = MV_TAG('g','l','y','f'); tbls[nTbls].data = newGlyf; tbls[nTbls++].len = (uint32_t)newGlyfSize;
             tbls[nTbls].tag = MV_TAG('h','e','a','d'); tbls[nTbls].data = head; tbls[nTbls++].len = headLen;
             tbls[nTbls].tag = MV_TAG('h','h','e','a'); tbls[nTbls].data = hhea; tbls[nTbls++].len = hheaLen;
             tbls[nTbls].tag = MV_TAG('h','m','t','x'); tbls[nTbls].data = hmtx; tbls[nTbls++].len = hmtxLen;
             tbls[nTbls].tag = MV_TAG('l','o','c','a'); tbls[nTbls].data = newLocaBytes; tbls[nTbls++].len = newLocaLen;
             tbls[nTbls].tag = MV_TAG('m','a','x','p'); tbls[nTbls].data = maxp; tbls[nTbls++].len = maxpLen;
+            if (hasPost30) { tbls[nTbls].tag = MV_TAG('p','o','s','t'); tbls[nTbls].data = post30; tbls[nTbls++].len = 32; }
+            if (prep && prepLen > 0) { tbls[nTbls].tag = MV_TAG('p','r','e','p'); tbls[nTbls].data = prep; tbls[nTbls++].len = prepLen; }
 
             /* Sort table entries by tag */
             for (ti = 0; ti < nTbls - 1; ti++) {
@@ -373,8 +399,22 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
             }
 
             for (ti = 0; ti < nTbls; ti++) {
+                if (tbls[ti].tag == MV_TAG('h','e','a','d')) {
+                    headOffsetInSfnt = sfnt.n;
+                }
                 buf_put(&sfnt, tbls[ti].data, tbls[ti].len);
                 while (sfnt.n & 3) buf_putc(&sfnt, 0);
+            }
+
+            /* Recalculate head.checkSumAdjustment = 0xB1B0AFBA - wholeFontChecksum */
+            if (headOffsetInSfnt > 0 && headOffsetInSfnt + 12 <= sfnt.n) {
+                uint32_t totalSum = calc_table_checksum((const uint8_t *)sfnt.p, (uint32_t)sfnt.n);
+                uint32_t adj = 0xB1B0AFBAu - totalSum;
+                uint8_t *hp = (uint8_t *)sfnt.p + headOffsetInSfnt;
+                hp[8]  = (uint8_t)(adj >> 24);
+                hp[9]  = (uint8_t)(adj >> 16);
+                hp[10] = (uint8_t)(adj >> 8);
+                hp[11] = (uint8_t)adj;
             }
         }
         free(newLocaBytes);
@@ -384,12 +424,51 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
     free(newLoca);
     free(newGlyf);
     free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
+    free(cvt); free(fpgm); free(prep); free(post);
 
     *outLen = sfnt.n;
     return (uint8_t *)sfnt.p;
 }
 
 /* ---------------- Main PDF Exporter ---------------- */
+
+static void format_subset_font_name(const Font *fnt, int fontIndex, char *out, size_t outCap)
+{
+    uint32_t h = (uint32_t)(fontIndex + 1) * 2654435761u;
+    const char *base = (fnt && fnt->psName[0]) ? fnt->psName : "";
+    char clean[64];
+    int k, o = 0;
+    char tag[7];
+
+    for (k = 0; base[k] && o < 56; k++) {
+        uint8_t c = (uint8_t)base[k];
+        if (c > 32 && c < 127 && c != '(' && c != ')' && c != '<' && c != '>' &&
+            c != '[' && c != ']' && c != '{' && c != '}' && c != '/' && c != '%' && c != '#') {
+            clean[o++] = (char)c;
+            h = h * 33u + c;
+        }
+    }
+    clean[o] = 0;
+    if (o == 0) _snprintf_s(clean, sizeof(clean), _TRUNCATE, "Font%d", fontIndex);
+
+    for (k = 0; k < 6; k++) {
+        tag[k] = (char)('A' + ((h >> (k * 5)) % 26u));
+    }
+    tag[6] = 0;
+    _snprintf_s(out, outCap, _TRUNCATE, "%s+%s", tag, clean);
+}
+
+typedef struct PdfCMapEntry {
+    int gid;
+    uint16_t ch1, ch2;
+} PdfCMapEntry;
+
+static int cmp_pdf_cmap_entry(const void *a, const void *b)
+{
+    const PdfCMapEntry *ea = (const PdfCMapEntry *)a;
+    const PdfCMapEntry *eb = (const PdfCMapEntry *)b;
+    return (ea->gid < eb->gid) ? -1 : (ea->gid > eb->gid ? 1 : 0);
+}
 
 int pdf_write(const Layout *L, const char *path, char *err, int errcap)
 {
@@ -508,11 +587,14 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
         int fontFileObj, descriptorObj, cidFontObj, toUnicodeObj;
         Buf toUni = {0};
         int gid;
+        char subsetName[80];
 
         if (!fnt || !usedGlyphs[f].flags) continue;
 
         fontFileData = build_subset_font(fnt, &usedGlyphs[f], &fontFileSize);
         if (!fontFileData || fontFileSize == 0) continue;
+
+        format_subset_font_name(fnt, f, subsetName, sizeof(subsetName));
 
         /* FontFile2 */
         fontFileObj = pdf_new_obj(&pw);
@@ -527,7 +609,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
                             "/Flags %u /FontBBox [%d %d %d %d] /ItalicAngle %d\n"
                             "/Ascent %d /Descent %d /CapHeight %d /StemV %d\n"
                             "/FontFile2 %d 0 R >>\n",
-                   fnt->psName,
+                   subsetName,
                    32u | (fnt->fixedPitch ? 1u : 0u) | (fnt->italic ? 64u : 0u),
                    (int)((int64_t)fnt->xMin * 1000 / fnt->upem),
                    (int)((int64_t)fnt->yMin * 1000 / fnt->upem),
@@ -546,7 +628,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
         buf_printf(&pw.buf, "<< /Type /Font /Subtype /CIDFontType2 /BaseFont /%s\n"
                             "/CIDSystemInfo << /Registry (Adobe) /Ordering (Identity) /Supplement 0 >>\n"
                             "/FontDescriptor %d 0 R /CIDToGIDMap /Identity\n"
-                            "/DW 1000 /W [", fnt->psName, descriptorObj);
+                            "/DW 1000 /W [", subsetName, descriptorObj);
         for (gid = 0; gid < fnt->numGlyphs; gid++) {
             if (is_glyph_marked(&usedGlyphs[f], gid)) {
                 int w = (int)((int64_t)font_adv(fnt, gid) * 1000 / fnt->upem);
@@ -569,8 +651,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
 
         /* Build mapping for used glyphs from Layout->text (UTF-8) */
         {
-            typedef struct { int gid; uint16_t ch1, ch2; } CMapEntry;
-            CMapEntry *entries = (CMapEntry *)malloc((size_t)fnt->numGlyphs * sizeof(CMapEntry));
+            PdfCMapEntry *entries = (PdfCMapEntry *)malloc((size_t)fnt->numGlyphs * sizeof(PdfCMapEntry));
             int totalEntries = 0;
             if (entries) {
                 for (i = 0; i < L->nitems; i++) {
@@ -579,7 +660,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
                         int k;
                         for (k = 0; k < it->n; k++) {
                             int gidVal = it->gids[k];
-                            if (is_glyph_marked(&usedGlyphs[f], gidVal)) {
+                            if (gidVal > 0 && is_glyph_marked(&usedGlyphs[f], gidVal)) {
                                 int toff = it->toff[k];
                                 if (toff >= 0 && toff < L->textlen && totalEntries < fnt->numGlyphs) {
                                     int tmpIdx = toff;
@@ -601,6 +682,9 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
                         }
                     }
                 }
+                if (totalEntries > 1) {
+                    qsort(entries, (size_t)totalEntries, sizeof(PdfCMapEntry), cmp_pdf_cmap_entry);
+                }
                 int idx = 0;
                 while (idx < totalEntries) {
                     int batch = totalEntries - idx;
@@ -608,7 +692,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
                     if (batch > 100) batch = 100;
                     buf_printf(&toUni, "%d beginbfchar\n", batch);
                     for (b = 0; b < batch; b++) {
-                        CMapEntry *e = &entries[idx + b];
+                        PdfCMapEntry *e = &entries[idx + b];
                         if (e->ch2) {
                             buf_printf(&toUni, "<%04X> <%04X%04X>\n", e->gid, (unsigned)e->ch1, (unsigned)e->ch2);
                         } else {
@@ -636,7 +720,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
         buf_printf(&pw.buf, "<< /Type /Font /Subtype /Type0 /BaseFont /%s\n"
                             "/Encoding /Identity-H /DescendantFonts [%d 0 R]\n"
                             "/ToUnicode %d 0 R >>\n",
-                   fnt->psName, cidFontObj, toUnicodeObj);
+                   subsetName, cidFontObj, toUnicodeObj);
         pdf_end_obj(&pw);
     }
 
@@ -765,34 +849,36 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
                     case IT_GLYPHS: {
                         if (it->font && it->n > 0) {
                             int fid = it->font->id;
-                            float r = (float)((it->color >> 16) & 0xFF) / 255.0f;
-                            float g = (float)((it->color >> 8) & 0xFF) / 255.0f;
-                            float b = (float)(it->color & 0xFF) / 255.0f;
-                            float x = it->x * 0.75f;
-                            float y = ptH - it->y * 0.75f;
-                            float sz = it->size * 0.75f;
-                            int k;
+                            if (fid >= 0 && fid < fontCount && fontType0Objs[fid]) {
+                                float r = (float)((it->color >> 16) & 0xFF) / 255.0f;
+                                float g = (float)((it->color >> 8) & 0xFF) / 255.0f;
+                                float b = (float)(it->color & 0xFF) / 255.0f;
+                                float x = it->x * 0.75f;
+                                float y = ptH - it->y * 0.75f;
+                                float sz = it->size * 0.75f;
+                                int k;
 
-                            float naturalW = 0;
-                            for (k = 0; k < it->n; k++) {
-                                naturalW += (float)font_adv(it->font, it->gids[k]) * it->size / (float)it->font->upem;
-                            }
-                            float extraPerGlyph = (it->w - naturalW) / (float)it->n;
-                            if (extraPerGlyph > 0.05f) {
-                                float tc = extraPerGlyph * 0.75f;
-                                buf_printf(&content, "BT\n/F%d %.3f Tf\n%.3f Tc\n%.3f %.3f %.3f rg\n%.3f %.3f Td\n<",
-                                           fid + 1, sz, tc, r, g, b, x, y);
+                                float naturalW = 0;
                                 for (k = 0; k < it->n; k++) {
-                                    buf_printf(&content, "%04X", it->gids[k]);
+                                    naturalW += (float)font_adv(it->font, it->gids[k]) * it->size / (float)it->font->upem;
                                 }
-                                buf_puts(&content, "> Tj\n0 Tc\nET\n");
-                            } else {
-                                buf_printf(&content, "BT\n/F%d %.3f Tf\n%.3f %.3f %.3f rg\n%.3f %.3f Td\n<",
-                                           fid + 1, sz, r, g, b, x, y);
-                                for (k = 0; k < it->n; k++) {
-                                    buf_printf(&content, "%04X", it->gids[k]);
+                                float extraPerGlyph = (it->w - naturalW) / (float)it->n;
+                                if (extraPerGlyph > 0.05f) {
+                                    float tc = extraPerGlyph * 0.75f;
+                                    buf_printf(&content, "BT\n/F%d %.3f Tf\n%.3f Tc\n%.3f %.3f %.3f rg\n%.3f %.3f Td\n<",
+                                               fid + 1, sz, tc, r, g, b, x, y);
+                                    for (k = 0; k < it->n; k++) {
+                                        buf_printf(&content, "%04X", it->gids[k]);
+                                    }
+                                    buf_puts(&content, "> Tj\n0 Tc\nET\n");
+                                } else {
+                                    buf_printf(&content, "BT\n/F%d %.3f Tf\n%.3f %.3f %.3f rg\n%.3f %.3f Td\n<",
+                                               fid + 1, sz, r, g, b, x, y);
+                                    for (k = 0; k < it->n; k++) {
+                                        buf_printf(&content, "%04X", it->gids[k]);
+                                    }
+                                    buf_puts(&content, "> Tj\nET\n");
                                 }
-                                buf_puts(&content, "> Tj\nET\n");
                             }
                         }
                         break;

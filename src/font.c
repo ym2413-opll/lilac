@@ -65,6 +65,30 @@ void font_shutdown(void)
 int font_count(void) { return g_numFonts; }
 Font *font_by_id(int id) { return (id >= 0 && id < g_numFonts) ? g_fonts[id] : NULL; }
 
+static int CALLBACK enum_font_cb(const LOGFONTW *lf, const TEXTMETRICW *tm, DWORD type, LPARAM lp)
+{
+    (void)lf;
+    (void)tm;
+    *(int *)lp = (type & TRUETYPE_FONTTYPE) ? 2 : 1;
+    return 0;
+}
+
+static int font_face_installed(const char *face)
+{
+    LOGFONTW lf;
+    wchar_t wface[64] = {0};
+    int found = 0;
+
+    if (!g_fontHdc) font_init();
+    if (!face || !face[0] || !g_fontHdc) return 0;
+    MultiByteToWideChar(CP_UTF8, 0, face, -1, wface, 64);
+    memset(&lf, 0, sizeof(lf));
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcsncpy_s(lf.lfFaceName, LF_FACESIZE, wface, _TRUNCATE);
+    EnumFontFamiliesExW(g_fontHdc, &lf, enum_font_cb, (LPARAM)&found, 0);
+    return found != 0;
+}
+
 uint8_t *font_table(const Font *f, uint32_t tag, uint32_t *len)
 {
     DWORD dwTag = _byteswap_ulong(tag);
@@ -78,7 +102,7 @@ uint8_t *font_table(const Font *f, uint32_t tag, uint32_t *len)
     if (!f || !g_fontHdc) return NULL;
     MultiByteToWideChar(CP_UTF8, 0, f->face, -1, wface, 64);
     hf = CreateFontW(32, 0, 0, 0, f->bold ? FW_BOLD : FW_NORMAL, f->italic ? TRUE : FALSE,
-                     FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                     FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_ONLY_PRECIS,
                      CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY, DEFAULT_PITCH, wface);
     if (!hf) return NULL;
     old = SelectObject(g_fontHdc, hf);
@@ -103,10 +127,24 @@ uint8_t *font_table(const Font *f, uint32_t tag, uint32_t *len)
     return buf;
 }
 
+static int is_pdf_name_char(uint32_t c)
+{
+    if (c <= 32 || c >= 127) return 0;
+    if (c == '(' || c == ')' || c == '<' || c == '>' ||
+        c == '[' || c == ']' || c == '{' || c == '}' ||
+        c == '/' || c == '%' || c == '#') {
+        return 0;
+    }
+    return 1;
+}
+
 static void parse_name(Font *f, const uint8_t *data, uint32_t len)
 {
     uint16_t count, stringOffset, i;
     const uint8_t *records;
+    int bestScore = -1;
+    char bestName[64] = {0};
+
     if (len < 6) return;
     count = read_u16(data + 2);
     stringOffset = read_u16(data + 4);
@@ -116,26 +154,40 @@ static void parse_name(Font *f, const uint8_t *data, uint32_t len)
     for (i = 0; i < count; i++) {
         const uint8_t *rec = records + i * 12;
         uint16_t platformId = read_u16(rec);
+        uint16_t encodingId = read_u16(rec + 2);
+        uint16_t languageId = read_u16(rec + 4);
         uint16_t nameId = read_u16(rec + 6);
         uint16_t nlen = read_u16(rec + 8);
         uint16_t offset = read_u16(rec + 10);
-        if (nameId == 6 && (uint32_t)(stringOffset + offset + nlen) <= len) {
+        if (nameId == 6 && (uint32_t)stringOffset + offset + nlen <= len) {
             const uint8_t *s = data + stringOffset + offset;
-            int k, o = 0;
+            char cand[64];
+            int k, o = 0, score = 0;
+            if (platformId == 3 && encodingId == 1) score = (languageId == 0x0409) ? 4 : 3;
+            else if (platformId == 0) score = 2;
+            else if (platformId == 1 && encodingId == 0) score = 1;
+            else continue;
+
             if (platformId == 3 || platformId == 0) { /* UTF-16BE */
                 for (k = 0; k + 1 < nlen && o < 63; k += 2) {
-                    char c = (char)s[k + 1];
-                    if (c > 32 && c < 127) f->psName[o++] = c;
+                    uint16_t ch = read_u16(s + k);
+                    if (is_pdf_name_char(ch)) cand[o++] = (char)ch;
                 }
-            } else { /* Mac or Roman */
+            } else { /* Mac Roman */
                 for (k = 0; k < nlen && o < 63; k++) {
-                    char c = (char)s[k];
-                    if (c > 32 && c < 127) f->psName[o++] = c;
+                    uint8_t ch = s[k];
+                    if (is_pdf_name_char(ch)) cand[o++] = (char)ch;
                 }
             }
-            f->psName[o] = 0;
-            if (o > 0) return;
+            cand[o] = 0;
+            if (o > 0 && score > bestScore) {
+                bestScore = score;
+                strcpy_s(bestName, sizeof(bestName), cand);
+            }
         }
+    }
+    if (bestScore >= 0) {
+        strcpy_s(f->psName, sizeof(f->psName), bestName);
     }
 }
 
@@ -143,6 +195,7 @@ static void setup_cmap(Font *f, const uint8_t *data, uint32_t len)
 {
     uint16_t numTables, i;
     uint32_t sub12 = 0, sub4 = 0;
+    int score12 = 0, score4 = 0;
     if (len < 4) return;
     numTables = read_u16(data + 2);
     if (len < (uint32_t)(4 + numTables * 8)) return;
@@ -153,17 +206,24 @@ static void setup_cmap(Font *f, const uint8_t *data, uint32_t len)
         uint32_t offset = read_u32(data + 4 + i * 8 + 4);
         if (offset + 4 <= len) {
             uint16_t format = read_u16(data + offset);
-            if (format == 12 && (platformId == 3 && (encodingId == 10 || encodingId == 1))) {
-                if (offset + 16 <= len) {
-                    uint32_t nGroups = read_u32(data + offset + 12);
-                    if (nGroups <= (len - offset - 16) / 12) sub12 = offset;
+            if (format == 12 && offset + 16 <= len) {
+                uint32_t nGroups = read_u32(data + offset + 12);
+                int s = 0;
+                if ((platformId == 3 && encodingId == 10) || (platformId == 0 && encodingId == 4)) s = 3;
+                else if ((platformId == 0 && encodingId == 3) || (platformId == 3 && encodingId == 1)) s = 2;
+                if (s > score12 && nGroups <= (len - offset - 16) / 12) {
+                    sub12 = offset;
+                    score12 = s;
                 }
-            } else if (format == 4 && (platformId == 3 || platformId == 0)) {
-                if (!sub4 && offset + 14 <= len) {
-                    uint16_t segCountX2 = read_u16(data + offset + 6);
-                    if ((segCountX2 & 1) == 0 && (uint32_t)segCountX2 * 4 + 16 <= len - offset) {
-                        sub4 = offset;
-                    }
+            } else if (format == 4 && offset + 14 <= len) {
+                uint16_t segCountX2 = read_u16(data + offset + 6);
+                int s = 0;
+                if (platformId == 3 && encodingId == 1) s = 4; /* Windows Unicode BMP */
+                else if (platformId == 0 && encodingId <= 4) s = 3; /* Unicode */
+                else if (platformId == 3 && encodingId == 10) s = 2;
+                if (s > score4 && (segCountX2 & 1) == 0 && (uint32_t)segCountX2 * 4 + 16 <= len - offset) {
+                    sub4 = offset;
+                    score4 = s;
                 }
             }
         }
@@ -197,6 +257,7 @@ Font *font_get(const char *face, int bold, int italic)
         }
     }
 
+    if (!font_face_installed(face)) return NULL;
     if (g_numFonts >= MAX_FONTS) return NULL;
     f = (Font *)calloc(1, sizeof(Font));
     if (!f) return NULL;
@@ -206,7 +267,16 @@ Font *font_get(const char *face, int bold, int italic)
     f->bold = bold;
     f->italic = italic;
 
-    /* Check if TrueType font data exists */
+    /* Check if TrueType font data (including glyf/loca outlines for PDF subsetting) exists */
+    {
+        uint8_t *glyf = NULL, *loca = NULL;
+        uint32_t glyfLen = 0, locaLen = 0;
+        glyf = font_table(f, MV_TAG('g','l','y','f'), &glyfLen);
+        loca = font_table(f, MV_TAG('l','o','c','a'), &locaLen);
+        free(glyf);
+        free(loca);
+        if (!glyfLen || !locaLen) { free(f); return NULL; }
+    }
     head = font_table(f, MV_TAG('h','e','a','d'), &headLen);
     if (!head || headLen < 54) { free(head); free(f); return NULL; }
 
@@ -278,12 +348,16 @@ Font *font_get(const char *face, int bold, int italic)
     }
     if (!f->psName[0]) {
         int k, o = 0;
-        for (k = 0; f->face[k] && o < 50; k++) {
+        for (k = 0; f->face[k] && o < 48; k++) {
             if ((f->face[k] >= 'A' && f->face[k] <= 'Z') ||
                 (f->face[k] >= 'a' && f->face[k] <= 'z') ||
                 (f->face[k] >= '0' && f->face[k] <= '9')) {
                 f->psName[o++] = f->face[k];
             }
+        }
+        if (o == 0) {
+            _snprintf_s(f->psName, sizeof(f->psName), _TRUNCATE, "Font%d", f->id);
+            o = (int)strlen(f->psName);
         }
         if (bold && italic) strcpy_s(f->psName + o, 64 - o, "-BoldItalic");
         else if (bold) strcpy_s(f->psName + o, 64 - o, "-Bold");
@@ -380,9 +454,9 @@ static int g_chainInited = 0;
 
 /* "\xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95" is UTF-8 for "맑은 고딕" */
 static const char g_defaultBodyChain[] =
-    "Pretendard, \xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95, Segoe UI, Segoe UI Emoji, Segoe UI Symbol, Arial, Gulim";
+    "Pretendard, \xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95, Malgun Gothic, Segoe UI, Segoe UI Emoji, Segoe UI Symbol, Arial, Gulim";
 static const char g_defaultMonoChain[] =
-    "D2Coding, Consolas, \xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95, Segoe UI Emoji, Segoe UI Symbol, Courier New";
+    "D2Coding, Consolas, \xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95, Malgun Gothic, Segoe UI Emoji, Segoe UI Symbol, Courier New";
 static const char g_defaultMathChain[] =
     "Cambria Math, Cambria, Times New Roman, Segoe UI Symbol, Segoe UI, \xEB\xA7\x91\xEC\x9D\x80 \xEA\xB3\xA0\xEB\x94\x95, Malgun Gothic";
 
