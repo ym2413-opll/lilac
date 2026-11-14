@@ -112,13 +112,14 @@ static void pdf_put_text_string(Buf *b, const char *s)
     buf_putc(b, '>');
 }
 
-static void pdf_put_stream(PdfWriter *pw, const void *data, size_t len, int compress)
+static void pdf_put_stream(PdfWriter *pw, const void *data, size_t len, int compress, int inOpenDict)
 {
+    if (!inOpenDict) buf_puts(&pw->buf, "<< ");
     if (compress && len > 64) {
         uint8_t *comp = NULL;
         size_t clen = zlib_compress(data, len, &comp);
         if (comp && clen > 0 && clen < len) {
-            buf_printf(&pw->buf, "<< /Filter /FlateDecode /Length %u >>\nstream\n", (unsigned)clen);
+            buf_printf(&pw->buf, "/Filter /FlateDecode /Length %u >>\nstream\n", (unsigned)clen);
             buf_put(&pw->buf, comp, clen);
             buf_puts(&pw->buf, "\nendstream\n");
             free(comp);
@@ -126,7 +127,7 @@ static void pdf_put_stream(PdfWriter *pw, const void *data, size_t len, int comp
         }
         free(comp);
     }
-    buf_printf(&pw->buf, "<< /Length %u >>\nstream\n", (unsigned)len);
+    buf_printf(&pw->buf, "/Length %u >>\nstream\n", (unsigned)len);
     if (len && data) buf_put(&pw->buf, data, len);
     buf_puts(&pw->buf, "\nendstream\n");
 }
@@ -211,7 +212,93 @@ static uint32_t calc_table_checksum(const uint8_t *data, uint32_t len)
     return sum;
 }
 
-static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
+static void put_u16be(Buf *b, uint16_t v)
+{
+    buf_putc(b, (char)(v >> 8));
+    buf_putc(b, (char)v);
+}
+
+static void put_u32be(Buf *b, uint32_t v)
+{
+    buf_putc(b, (char)(v >> 24));
+    buf_putc(b, (char)(v >> 16));
+    buf_putc(b, (char)(v >> 8));
+    buf_putc(b, (char)v);
+}
+
+static void put_ascii_u16be(Buf *b, const char *s)
+{
+    for (; *s; s++) {
+        buf_putc(b, 0);
+        buf_putc(b, *s);
+    }
+}
+
+/* Synthesize a compact Windows-compatible 'name' table (nameIDs 1..6) so OS
+ * font validators (Windows GDI / DirectWrite / Windows.Data.Pdf / Edge) accept
+ * the subset TrueType font. */
+static void build_minimal_name_table(Buf *out, const Font *f, const char *psName)
+{
+    const char *sName = (psName && psName[0]) ? psName : "SubsetFont";
+    const char *sSub = (f && f->bold && f->italic) ? "Bold Italic"
+                     : (f && f->bold) ? "Bold"
+                     : (f && f->italic) ? "Italic" : "Regular";
+    const char *sVer = "Version 1.0";
+    uint16_t lenName = (uint16_t)(strlen(sName) * 2);
+    uint16_t lenSub  = (uint16_t)(strlen(sSub) * 2);
+    uint16_t lenVer  = (uint16_t)(strlen(sVer) * 2);
+    uint16_t offName = 0;
+    uint16_t offSub  = lenName;
+    uint16_t offVer  = (uint16_t)(offSub + lenSub);
+    static const uint16_t ids[6] = { 1, 2, 3, 4, 5, 6 };
+    int i;
+
+    put_u16be(out, 0);      /* format */
+    put_u16be(out, 6);      /* count */
+    put_u16be(out, 6 + 6 * 12); /* stringOffset */
+    for (i = 0; i < 6; i++) {
+        uint16_t nlen = lenName, noff = offName;
+        if (ids[i] == 2) { nlen = lenSub; noff = offSub; }
+        else if (ids[i] == 5) { nlen = lenVer; noff = offVer; }
+        put_u16be(out, 3);      /* platformID: Windows */
+        put_u16be(out, 1);      /* encodingID: Unicode BMP */
+        put_u16be(out, 0x0409); /* languageID: en-US */
+        put_u16be(out, ids[i]);
+        put_u16be(out, nlen);
+        put_u16be(out, noff);
+    }
+    put_ascii_u16be(out, sName);
+    put_ascii_u16be(out, sSub);
+    put_ascii_u16be(out, sVer);
+}
+
+/* Synthesize a minimal valid Windows Unicode BMP (3,1) Format-4 'cmap' table.
+ * PDF CIDFontType2 with /CIDToGIDMap /Identity addresses glyphs by GID directly,
+ * but Windows font loaders reject TrueType SFNTs that lack a 'cmap' table. */
+static void build_minimal_cmap_table(Buf *out)
+{
+    put_u16be(out, 0);   /* version */
+    put_u16be(out, 1);   /* numTables */
+    put_u16be(out, 3);   /* platformID: Windows */
+    put_u16be(out, 1);   /* encodingID: Unicode BMP */
+    put_u32be(out, 12);  /* subtable offset */
+
+    /* Format 4 subtable (32 bytes): maps 0x0000 -> GID 0, sentinel 0xFFFF -> GID 0 */
+    put_u16be(out, 4);   /* format */
+    put_u16be(out, 32);  /* length */
+    put_u16be(out, 0);   /* language */
+    put_u16be(out, 4);   /* segCountX2 (2 segments) */
+    put_u16be(out, 4);   /* searchRange */
+    put_u16be(out, 1);   /* entrySelector */
+    put_u16be(out, 0);   /* rangeShift */
+    put_u16be(out, 0x0000); put_u16be(out, 0xFFFF); /* endCode */
+    put_u16be(out, 0);                              /* reservedPad */
+    put_u16be(out, 0x0000); put_u16be(out, 0xFFFF); /* startCode */
+    put_u16be(out, 0);      put_u16be(out, 1);      /* idDelta */
+    put_u16be(out, 0);      put_u16be(out, 0);      /* idRangeOffset */
+}
+
+static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, const char *psName, size_t *outLen)
 {
     uint8_t *head = NULL, *hhea = NULL, *maxp = NULL, *os2 = NULL, *hmtx = NULL, *loca = NULL, *glyf = NULL;
     uint8_t *cvt = NULL, *fpgm = NULL, *prep = NULL, *post = NULL;
@@ -244,7 +331,7 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
         return NULL;
     }
 
-    isLocaLong = (head[51] != 0);
+    isLocaLong = (head[50] != 0 || head[51] != 0);
     if (locaLen < (uint32_t)(f->numGlyphs + 1) * (isLocaLong ? 4u : 2u)) {
         free(head); free(hhea); free(maxp); free(os2); free(hmtx); free(loca); free(glyf);
         free(cvt); free(fpgm); free(prep); free(post);
@@ -340,12 +427,17 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
                 const uint8_t *data;
                 uint32_t len;
             } TblEntry;
-            TblEntry tbls[12];
+            Buf minName = {0}, minCmap = {0};
+            TblEntry tbls[14];
             int nTbls = 0, ti;
             uint32_t offset;
             size_t headOffsetInSfnt = 0;
 
+            build_minimal_name_table(&minName, f, psName);
+            build_minimal_cmap_table(&minCmap);
+
             if (os2) { tbls[nTbls].tag = MV_TAG('O','S','/','2'); tbls[nTbls].data = os2; tbls[nTbls++].len = os2Len; }
+            if (minCmap.n > 0) { tbls[nTbls].tag = MV_TAG('c','m','a','p'); tbls[nTbls].data = (const uint8_t *)minCmap.p; tbls[nTbls++].len = (uint32_t)minCmap.n; }
             if (cvt && cvtLen > 0) { tbls[nTbls].tag = MV_TAG('c','v','t',' '); tbls[nTbls].data = cvt; tbls[nTbls++].len = cvtLen; }
             if (fpgm && fpgmLen > 0) { tbls[nTbls].tag = MV_TAG('f','p','g','m'); tbls[nTbls].data = fpgm; tbls[nTbls++].len = fpgmLen; }
             tbls[nTbls].tag = MV_TAG('g','l','y','f'); tbls[nTbls].data = newGlyf; tbls[nTbls++].len = (uint32_t)newGlyfSize;
@@ -354,6 +446,7 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
             tbls[nTbls].tag = MV_TAG('h','m','t','x'); tbls[nTbls].data = hmtx; tbls[nTbls++].len = hmtxLen;
             tbls[nTbls].tag = MV_TAG('l','o','c','a'); tbls[nTbls].data = newLocaBytes; tbls[nTbls++].len = newLocaLen;
             tbls[nTbls].tag = MV_TAG('m','a','x','p'); tbls[nTbls].data = maxp; tbls[nTbls++].len = maxpLen;
+            if (minName.n > 0) { tbls[nTbls].tag = MV_TAG('n','a','m','e'); tbls[nTbls].data = (const uint8_t *)minName.p; tbls[nTbls++].len = (uint32_t)minName.n; }
             if (hasPost30) { tbls[nTbls].tag = MV_TAG('p','o','s','t'); tbls[nTbls].data = post30; tbls[nTbls++].len = 32; }
             if (prep && prepLen > 0) { tbls[nTbls].tag = MV_TAG('p','r','e','p'); tbls[nTbls].data = prep; tbls[nTbls++].len = prepLen; }
 
@@ -426,6 +519,8 @@ static uint8_t *build_subset_font(Font *f, const UsedGlyphs *ug, size_t *outLen)
                 hp[10] = (uint8_t)(adj >> 8);
                 hp[11] = (uint8_t)adj;
             }
+            buf_free(&minName);
+            buf_free(&minCmap);
         }
         free(newLocaBytes);
     }
@@ -582,7 +677,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
                 maskObj = pdf_new_obj(&pw);
                 buf_printf(&pw.buf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceGray /BitsPerComponent 8\n",
                            img->w, img->h);
-                pdf_put_stream(&pw, alpha, total, 1);
+                pdf_put_stream(&pw, alpha, total, 1, 1);
                 pdf_end_obj(&pw);
                 free(alpha);
             }
@@ -591,7 +686,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
             buf_printf(&pw.buf, "<< /Type /XObject /Subtype /Image /Width %d /Height %d /ColorSpace /DeviceRGB /BitsPerComponent 8\n",
                        img->w, img->h);
             if (maskObj) buf_printf(&pw.buf, "/SMask %d 0 R\n", maskObj);
-            pdf_put_stream(&pw, rgb, total * 3, 1);
+            pdf_put_stream(&pw, rgb, total * 3, 1, 1);
             pdf_end_obj(&pw);
             free(rgb);
         }
@@ -609,15 +704,14 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
 
         if (!fnt || !usedGlyphs[f].flags) continue;
 
-        fontFileData = build_subset_font(fnt, &usedGlyphs[f], &fontFileSize);
-        if (!fontFileData || fontFileSize == 0) { free(fontFileData); continue; }
-
         format_subset_font_name(fnt, f, subsetName, sizeof(subsetName));
+        fontFileData = build_subset_font(fnt, &usedGlyphs[f], subsetName, &fontFileSize);
+        if (!fontFileData || fontFileSize == 0) { free(fontFileData); continue; }
 
         /* FontFile2 */
         fontFileObj = pdf_new_obj(&pw);
         buf_printf(&pw.buf, "<< /Length1 %u\n", (unsigned)fontFileSize);
-        pdf_put_stream(&pw, fontFileData, fontFileSize, 1);
+        pdf_put_stream(&pw, fontFileData, fontFileSize, 1, 1);
         pdf_end_obj(&pw);
         free(fontFileData);
 
@@ -729,7 +823,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
                          "end\nend\n");
 
         toUnicodeObj = pdf_new_obj(&pw);
-        pdf_put_stream(&pw, toUni.p, toUni.n, 1);
+        pdf_put_stream(&pw, toUni.p, toUni.n, 1, 0);
         pdf_end_obj(&pw);
         buf_free(&toUni);
 
@@ -905,7 +999,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
         buf_puts(&content, "Q\n");
 
         contentObj = pdf_new_obj(&pw);
-        pdf_put_stream(&pw, content.p, content.n, 1);
+        pdf_put_stream(&pw, content.p, content.n, 1, 0);
         pdf_end_obj(&pw);
         buf_free(&content);
 
