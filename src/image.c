@@ -233,14 +233,21 @@ static int load_data_url(Image *img, const char *url)
     }
     if (isBase64) {
         payLen = strlen(comma + 1);
-        if (payLen <= 0x18000000u) {
+        /* Cap base64 payload so decoded bytes stay within 256 MiB (0x10000000) */
+        if (payLen <= 0x15555550u) {
             data = base64_decode(comma + 1, payLen, &dlen);
         }
     }
     if (!data) { img->failed = 1; return -1; }
     img->data = data;
     img->size = dlen;
-    return image_decode(img, data, dlen);
+    if (image_decode(img, data, dlen) != 0) {
+        free(img->data);
+        img->data = NULL;
+        img->size = 0;
+        return -1;
+    }
+    return 0;
 }
 
 static int is_public_ipv4(uint32_t ipHostOrder)
@@ -390,18 +397,28 @@ static int resolve_public_addr(const wchar_t *host, INTERNET_PORT port, wchar_t 
 typedef struct AsyncFetchCtx {
     HANDLE hStepEvent;
     HANDLE hCloseEvent;
+    volatile HINTERNET hRequest;
+    volatile LONG requestClosed;
     volatile LONG blocked;
     volatile LONG failed;
     DWORD avail;
     DWORD bytesRead;
 } AsyncFetchCtx;
 
+static void close_async_request(AsyncFetchCtx *ctx, HINTERNET hReq)
+{
+    if (!ctx || !hReq) return;
+    if (InterlockedCompareExchange(&ctx->requestClosed, 1, 0) == 0) {
+        ctx->hRequest = NULL;
+        WinHttpCloseHandle(hReq);
+    }
+}
+
 static void CALLBACK ssrf_winhttp_cb(HINTERNET hInternet, DWORD_PTR dwContext,
                                      DWORD dwInternetStatus, LPVOID lpvStatusInformation,
                                      DWORD dwStatusInformationLength)
 {
     AsyncFetchCtx *ctx = (AsyncFetchCtx *)dwContext;
-    (void)hInternet;
     if (!ctx) return;
 
     switch (dwInternetStatus) {
@@ -409,7 +426,11 @@ static void CALLBACK ssrf_winhttp_cb(HINTERNET hInternet, DWORD_PTR dwContext,
     case WINHTTP_CALLBACK_STATUS_CONNECTING_TO_SERVER:
     case WINHTTP_CALLBACK_STATUS_CONNECTED_TO_SERVER:
         if (!lpvStatusInformation || !ip_literal_is_public((const wchar_t *)lpvStatusInformation)) {
+            HINTERNET hReq = ctx->hRequest;
             InterlockedExchange(&ctx->blocked, 1);
+            if (hReq && hInternet == hReq) {
+                close_async_request(ctx, hReq);
+            }
             SetEvent(ctx->hStepEvent);
         }
         break;
@@ -532,6 +553,8 @@ int image_fetch_remote(Image *img)
             WinHttpCloseHandle(hConnect); hConnect = NULL;
             break;
         }
+        ctx.hRequest = hRequest;
+        ctx.requestClosed = 0;
         pCtx = (DWORD_PTR)&ctx;
         WinHttpSetOption(hRequest, WINHTTP_OPTION_CONTEXT_VALUE, &pCtx, sizeof(pCtx));
         WinHttpSetOption(hRequest, WINHTTP_OPTION_REDIRECT_POLICY, &redirPolicy, sizeof(redirPolicy));
@@ -545,7 +568,7 @@ int image_fetch_remote(Image *img)
             !wait_async_step(&ctx, 15000) ||
             !WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
                                  WINHTTP_HEADER_NAME_BY_INDEX, &status, &stSz, WINHTTP_NO_HEADER_INDEX)) {
-            WinHttpCloseHandle(hRequest); hRequest = NULL;
+            close_async_request(&ctx, hRequest); hRequest = NULL;
             WaitForSingleObject(ctx.hCloseEvent, 5000);
             CloseHandle(ctx.hStepEvent); CloseHandle(ctx.hCloseEvent);
             WinHttpCloseHandle(hConnect); hConnect = NULL;
@@ -574,7 +597,7 @@ int image_fetch_remote(Image *img)
                 }
                 free(loc);
             }
-            WinHttpCloseHandle(hRequest); hRequest = NULL;
+            close_async_request(&ctx, hRequest); hRequest = NULL;
             WaitForSingleObject(ctx.hCloseEvent, 5000);
             CloseHandle(ctx.hStepEvent); CloseHandle(ctx.hCloseEvent);
             WinHttpCloseHandle(hConnect); hConnect = NULL;
@@ -605,7 +628,7 @@ int image_fetch_remote(Image *img)
                 free(chunk);
             }
         }
-        WinHttpCloseHandle(hRequest); hRequest = NULL;
+        close_async_request(&ctx, hRequest); hRequest = NULL;
         WaitForSingleObject(ctx.hCloseEvent, 5000);
         CloseHandle(ctx.hStepEvent); CloseHandle(ctx.hCloseEvent);
         WinHttpCloseHandle(hConnect); hConnect = NULL;
@@ -620,12 +643,29 @@ int image_fetch_remote(Image *img)
         img->data = (uint8_t *)body.p;
         img->size = body.n;
         img->pending = 0;
-        return image_decode(img, img->data, img->size);
+        if (image_decode(img, img->data, img->size) != 0) {
+            free(img->data);
+            img->data = NULL;
+            img->size = 0;
+            return -1;
+        }
+        return 0;
     }
     buf_free(&body);
     img->pending = 0;
     img->failed = 1;
     return -1;
+}
+
+#define IMAGECACHE_MAX_BYTES (512u * 1024u * 1024u)
+
+static void imagecache_account(ImageCache *c, const Image *img)
+{
+    size_t add;
+    if (!c || !img) return;
+    add = img->size + (img->pixels ? (size_t)img->w * (size_t)img->h * 4u : 0u);
+    if (c->totalBytes <= SIZE_MAX - add) c->totalBytes += add;
+    else c->totalBytes = SIZE_MAX;
 }
 
 Image *imagecache_get(ImageCache *c, const char *key, int allowRemote)
@@ -636,8 +676,11 @@ Image *imagecache_get(ImageCache *c, const char *key, int allowRemote)
     for (img = c->head; img; img = img->next) {
         if (!strcmp(img->key, key)) {
             if (img->pending && allowRemote) {
-                if (!ascii_nicmp(img->key, "http://", 7) || !ascii_nicmp(img->key, "https://", 8)) {
-                    image_fetch_remote(img);
+                if (c->totalBytes >= IMAGECACHE_MAX_BYTES) {
+                    img->pending = 0;
+                    img->failed = 1;
+                } else if (!ascii_nicmp(img->key, "http://", 7) || !ascii_nicmp(img->key, "https://", 8)) {
+                    if (image_fetch_remote(img) == 0) imagecache_account(c, img);
                 } else {
                     img->pending = 0;
                     img->failed = 1;
@@ -653,11 +696,16 @@ Image *imagecache_get(ImageCache *c, const char *key, int allowRemote)
     img->next = c->head;
     c->head = img;
 
+    if (c->totalBytes >= IMAGECACHE_MAX_BYTES) {
+        img->failed = 1;
+        return img;
+    }
+
     if (!ascii_nicmp(key, "data:", 5)) {
-        load_data_url(img, key);
+        if (load_data_url(img, key) == 0) imagecache_account(c, img);
     } else if (!ascii_nicmp(key, "http://", 7) || !ascii_nicmp(key, "https://", 8)) {
         if (allowRemote) {
-            image_fetch_remote(img);
+            if (image_fetch_remote(img) == 0) imagecache_account(c, img);
         } else {
             img->pending = 1;
         }
@@ -675,7 +723,13 @@ Image *imagecache_get(ImageCache *c, const char *key, int allowRemote)
         if (!file_read_all(key, &data, &len)) {
             img->data = data;
             img->size = len;
-            image_decode(img, data, len);
+            if (image_decode(img, data, len) == 0) {
+                imagecache_account(c, img);
+            } else {
+                free(img->data);
+                img->data = NULL;
+                img->size = 0;
+            }
         } else {
             img->failed = 1;
         }

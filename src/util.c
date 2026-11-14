@@ -507,6 +507,14 @@ int path_is_remote(const char *s)
     return 0;
 }
 
+static int hex_digit_val(unsigned char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
 int link_is_safe_external(const char *s)
 {
     const char *p;
@@ -522,7 +530,14 @@ int link_is_safe_external(const char *s)
         unsigned char c = (unsigned char)*p;
         if (c < 0x20 || c == 0x7F) return 0;
         if (isMailto && (c == '"' || c == '<' || c == '>' || c == '`' || c == '\\')) return 0;
-        if (isMailto && c == '%' && p[1] == '0' && p[2] == '0') return 0;
+        if (isMailto && c == '%' && p[1] && p[2]) {
+            int hi = hex_digit_val((unsigned char)p[1]);
+            int lo = hex_digit_val((unsigned char)p[2]);
+            if (hi >= 0 && lo >= 0) {
+                int byte = (hi << 4) | lo;
+                if (byte != 0x0A && byte != 0x0D && (byte < 0x20 || byte == 0x7F)) return 0;
+            }
+        }
     }
     return 1;
 }

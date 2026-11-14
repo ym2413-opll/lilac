@@ -31,6 +31,7 @@ typedef struct Image {
 
 typedef struct ImageCache {
     Image *head;
+    size_t totalBytes;
 } ImageCache;
 
 ImageCache *imagecache_new(void);

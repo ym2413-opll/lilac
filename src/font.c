@@ -402,9 +402,10 @@ int font_glyph(Font *f, uint32_t cp)
                         int gid = (uint16_t)((cp + delta) & 0xFFFF);
                         return (gid < f->numGlyphs) ? gid : 0;
                     } else {
-                        const uint8_t *ptr = idRangeOffset + i * 2 + rangeOff + (cp - start) * 2;
-                        if (ptr >= f->cmapData && (size_t)(ptr - f->cmapData) + 2 <= f->cmapLen) {
-                            uint16_t gid = read_u16(ptr);
+                        size_t baseOff = (size_t)(idRangeOffset - f->cmapData);
+                        size_t off = baseOff + (size_t)i * 2u + (size_t)rangeOff + (size_t)(cp - start) * 2u;
+                        if (off + 2u <= f->cmapLen) {
+                            uint16_t gid = read_u16(f->cmapData + off);
                             if (gid != 0) {
                                 int mapped = (uint16_t)((gid + delta) & 0xFFFF);
                                 return (mapped < f->numGlyphs) ? mapped : 0;
@@ -431,8 +432,8 @@ int font_glyph(Font *f, uint32_t cp)
             else if (cp > end) l = m + 1;
             else {
                 uint32_t startGid = read_u32(grp + 8);
-                uint32_t gid = startGid + (cp - start);
-                return (gid < (uint32_t)f->numGlyphs) ? (int)gid : 0;
+                uint64_t gid = (uint64_t)startGid + (uint64_t)(cp - start);
+                return (gid < (uint64_t)f->numGlyphs) ? (int)gid : 0;
             }
         }
     }

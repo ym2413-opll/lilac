@@ -582,12 +582,14 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
     int fontCount = font_count();
     UsedGlyphs *usedGlyphs = NULL;
     int *fontType0Objs = NULL;
+    Image *imgs[64];
+    int nimgs = 0;
     int *imageObjs = NULL;
     int p, i, f;
     float ptW, ptH;
 
     if (!L || !path) {
-        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Invalid argument", _TRUNCATE);
+        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "잘못된 인자입니다.", _TRUNCATE);
         return -1;
     }
 
@@ -631,8 +633,6 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
     /* 2. Embed Image XObjects */
     {
         /* Collect unique images */
-        Image *imgs[64];
-        int nimgs = 0;
         for (i = 0; i < L->nitems; i++) {
             if (L->items[i].type == IT_IMAGE && L->items[i].img) {
                 Image *img = L->items[i].img;
@@ -946,11 +946,19 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
 
                     case IT_IMAGE: {
                         if (it->img && it->img->w > 0 && it->img->h > 0) {
-                            float x = it->x * 0.75f;
-                            float y = ptH - (it->y + it->h) * 0.75f;
-                            float w = it->w * 0.75f;
-                            float h = it->h * 0.75f;
-                            buf_printf(&content, "q %.3f 0 0 %.3f %.3f %.3f cm /Im1 Do Q\n", w, h, x, y);
+                            int imgIdx = -1;
+                            int k;
+                            for (k = 0; k < nimgs; k++) {
+                                if (imgs[k] == it->img) { imgIdx = k; break; }
+                            }
+                            if (imgIdx >= 0) {
+                                float x = it->x * 0.75f;
+                                float y = ptH - (it->y + it->h) * 0.75f;
+                                float w = it->w * 0.75f;
+                                float h = it->h * 0.75f;
+                                buf_printf(&content, "q %.3f 0 0 %.3f %.3f %.3f cm /Im%d Do Q\n",
+                                           w, h, x, y, imgIdx + 1);
+                            }
                         }
                         break;
                     }
@@ -1026,10 +1034,13 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
                     }
                 } else if (link_is_safe_external(target)) {
                     /* Only http(s)/mailto become clickable; file:, UNC, javascript: etc. are dropped */
-                    int annotObj = pdf_new_obj(&pw);
+                    const char *trimmed = target;
+                    int annotObj;
+                    while (*trimmed == ' ' || *trimmed == '\t' || *trimmed == '\r' || *trimmed == '\n') trimmed++;
+                    annotObj = pdf_new_obj(&pw);
                     buf_printf(&pw.buf, "<< /Type /Annot /Subtype /Link /Rect [%.3f %.3f %.3f %.3f] /Border [0 0 0]\n"
                                         "/A << /S /URI /URI ", x1, y1, x2, y2);
-                    pdf_put_uri_string(&pw.buf, target);
+                    pdf_put_uri_string(&pw.buf, trimmed);
                     buf_puts(&pw.buf, " >> >>\n");
                     pdf_end_obj(&pw);
                     buf_printf(&annots, "%d 0 R ", annotObj);
@@ -1049,8 +1060,13 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
             if (fontType0Objs[f]) buf_printf(&pw.buf, " /F%d %d 0 R", f + 1, fontType0Objs[f]);
         }
         buf_puts(&pw.buf, " >>");
-        if (imageObjs && imageObjs[0]) {
-            buf_printf(&pw.buf, " /XObject << /Im1 %d 0 R >>", imageObjs[0]);
+        if (imageObjs && nimgs > 0) {
+            int k;
+            buf_puts(&pw.buf, " /XObject <<");
+            for (k = 0; k < nimgs; k++) {
+                if (imageObjs[k]) buf_printf(&pw.buf, " /Im%d %d 0 R", k + 1, imageObjs[k]);
+            }
+            buf_puts(&pw.buf, " >>");
         }
         buf_puts(&pw.buf, " >>\n");
         if (numAnnots > 0) {
@@ -1124,7 +1140,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
     /* Write to file */
     if (file_write_all(path, pw.buf.p, pw.buf.n) != 0) {
         buf_free(&pw.buf);
-        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Failed to write PDF file", _TRUNCATE);
+        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "PDF 쓰기에 실패했습니다.", _TRUNCATE);
         return -1;
     }
     buf_free(&pw.buf);
@@ -1140,7 +1156,7 @@ fail_oom:
     free(pw.pageObjs);
     free(pw.xref);
     buf_free(&pw.buf);
-    if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Out of memory", _TRUNCATE);
+    if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "메모리가 부족합니다.", _TRUNCATE);
     return -1;
 }
 
@@ -1163,7 +1179,7 @@ int export_pdf(Doc *doc, const char *path, char *err, int errcap)
 
     L = layout_build(doc, &opt);
     if (!L) {
-        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Failed to layout document for PDF", _TRUNCATE);
+        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "PDF 조판에 실패했습니다.", _TRUNCATE);
         return -1;
     }
 

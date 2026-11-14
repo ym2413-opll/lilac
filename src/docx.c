@@ -524,7 +524,7 @@ int docx_write(Doc *doc, const char *path, char *err, int errcap)
     int i, rc;
 
     if (!doc || !path) {
-        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Invalid argument", _TRUNCATE);
+        if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "잘못된 인자입니다.", _TRUNCATE);
         return -1;
     }
 
@@ -803,7 +803,7 @@ int docx_write(Doc *doc, const char *path, char *err, int errcap)
 
     rc = zip_close(z, path);
     if (rc != 0 && err && errcap > 0) {
-        strncpy_s(err, (size_t)errcap, "Failed to write DOCX file", _TRUNCATE);
+        strncpy_s(err, (size_t)errcap, "DOCX 쓰기에 실패했습니다.", _TRUNCATE);
     }
     return rc;
 }
