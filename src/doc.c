@@ -321,6 +321,12 @@ static unsigned cur_style(PState *ps)
     return s;
 }
 
+static int cur_link(const PState *ps)
+{
+    if (ps->nlink <= 0) return -1;
+    return ps->linkStack[ps->nlink <= MAX_LINK_STACK ? ps->nlink - 1 : MAX_LINK_STACK - 1];
+}
+
 static int bit_index(unsigned bit)
 {
     int i = 0;
@@ -355,7 +361,7 @@ static void add_text(PState *ps, const char *s, int len, unsigned extraStyle)
     r = run_add(ps->doc, b);
     r->type = RN_TEXT;
     r->style = cur_style(ps) | extraStyle;
-    r->link = ps->nlink > 0 ? ps->linkStack[ps->nlink - 1] : -1;
+    r->link = cur_link(ps);
     r->text = arena_strndup(&ps->doc->arena, s, len);
     r->len = len;
 }
@@ -374,7 +380,7 @@ static Run *add_image(PState *ps, const char *src, const char *alt, const char *
     Run *r = run_add(ps->doc, ensure_inline(ps));
     r->type = RN_IMAGE;
     r->style = cur_style(ps);
-    r->link = ps->nlink > 0 ? ps->linkStack[ps->nlink - 1] : -1;
+    r->link = cur_link(ps);
     r->src = arena_strndup(&ps->doc->arena, src ? src : "", -1);
     r->text = arena_strndup(&ps->doc->arena, alt ? alt : "", -1);
     r->len = (int)strlen(r->text);
@@ -1032,7 +1038,7 @@ static int cb_leave_span(MD_SPANTYPE type, void *detail, void *ud)
                 Run *r = run_add(ps->doc, ensure_inline(ps));
                 r->type = RN_MATH;
                 r->style = cur_style(ps) | (ps->inMath == 2 ? ST_MATH_DISPLAY : 0);
-                r->link = ps->nlink > 0 ? ps->linkStack[ps->nlink - 1] : -1;
+                r->link = cur_link(ps);
                 r->text = arena_strndup(&ps->doc->arena, s, len);
                 r->len = len;
             }

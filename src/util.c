@@ -510,16 +510,19 @@ int path_is_remote(const char *s)
 int link_is_safe_external(const char *s)
 {
     const char *p;
+    int isMailto = 0;
     if (!s) return 0;
     while (*s == ' ' || *s == '\t' || *s == '\r' || *s == '\n') s++;
     if (ascii_nicmp(s, "http://", 7) == 0) p = s + 7;
     else if (ascii_nicmp(s, "https://", 8) == 0) p = s + 8;
-    else if (ascii_nicmp(s, "mailto:", 7) == 0) p = s + 7;
+    else if (ascii_nicmp(s, "mailto:", 7) == 0) { p = s + 7; isMailto = 1; }
     else return 0;
     if (!*p) return 0;
     for (; *p; p++) {
         unsigned char c = (unsigned char)*p;
         if (c < 0x20 || c == 0x7F) return 0;
+        if (isMailto && (c == '"' || c == '<' || c == '>' || c == '`' || c == '\\')) return 0;
+        if (isMailto && c == '%' && p[1] == '0' && p[2] == '0') return 0;
     }
     return 1;
 }

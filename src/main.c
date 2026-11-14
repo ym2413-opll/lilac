@@ -155,12 +155,13 @@ static int register_file_association(int reg)
 {
     wchar_t exePath[MAX_PATH];
     wchar_t cmdBuf[MAX_PATH + 32];
+    DWORD pathLen;
     HKEY hKey;
 
-    GetModuleFileNameW(NULL, exePath, MAX_PATH);
-    swprintf_s(cmdBuf, MAX_PATH + 32, L"\"%ls\" \"%%1\"", exePath);
-
     if (reg) {
+        pathLen = GetModuleFileNameW(NULL, exePath, MAX_PATH);
+        if (pathLen == 0 || pathLen >= MAX_PATH) return -1;
+        swprintf_s(cmdBuf, MAX_PATH + 32, L"\"%ls\" \"%%1\"", exePath);
         /* HKCU\Software\Classes\.md = Lilac.Document */
         if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\Classes\\.md", 0, NULL,
                             REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &hKey, NULL) == ERROR_SUCCESS) {
@@ -1902,7 +1903,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_HELP_ABOUT:
             MessageBoxW(hWnd,
                         L"Lilac the Markdown Viewer\n\n"
-                        L"by ym2413-opll, Version 1.3.0.\n",
+                        L"by ym2413-opll, Version 1.3.1.\n",
                         L"정보", MB_OK | MB_ICONINFORMATION);
             return 0;
         }

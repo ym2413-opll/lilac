@@ -17,32 +17,42 @@
 typedef struct PdfWriter {
     Buf       buf;
     uint32_t* xref;
-	int       maxObj;
+    int       maxObj;
     int       nextObj;
     int*      pageObjs;
     int       pageCount;
+    int       oom;
 } PdfWriter;
 
-static void ensure_xref_capacity(PdfWriter *pw, int id)
+static int ensure_xref_capacity(PdfWriter *pw, int id)
 {
+    if (pw->oom || id < 0) return -1;
     if (id >= pw->maxObj) {
         int newCap = pw->maxObj ? pw->maxObj * 2 : 4096;
-        while (newCap <= id) newCap *= 2;
-        uint32_t *reallocated = (uint32_t *)realloc(pw->xref, (size_t)newCap * sizeof(uint32_t));
+        uint32_t *reallocated;
+        while (newCap <= id) {
+            if (newCap > INT_MAX / 2) { pw->oom = 1; return -1; }
+            newCap *= 2;
+        }
+        if ((size_t)newCap > SIZE_MAX / sizeof(uint32_t)) { pw->oom = 1; return -1; }
+        reallocated = (uint32_t *)realloc(pw->xref, (size_t)newCap * sizeof(uint32_t));
         if (!reallocated) {
-            fprintf(stderr, "out of memory\n");
-            abort();
+            pw->oom = 1;
+            return -1;
         }
         memset(reallocated + pw->maxObj, 0, ((size_t)newCap - pw->maxObj) * sizeof(uint32_t));
         pw->xref = reallocated;
         pw->maxObj = newCap;
     }
+    return 0;
 }
 
 static int pdf_new_obj(PdfWriter *pw)
 {
-    int id = ++pw->nextObj;
-    ensure_xref_capacity(pw, id);
+    int id;
+    if (pw->oom || pw->nextObj >= INT_MAX) { pw->oom = 1; return 0; }
+    id = ++pw->nextObj;
+    if (ensure_xref_capacity(pw, id) != 0) return 0;
     pw->xref[id] = (uint32_t)pw->buf.n;
     buf_printf(&pw->buf, "%d 0 obj\n", id);
     return id;
@@ -130,14 +140,14 @@ typedef struct UsedGlyphs {
 
 static void mark_glyph(UsedGlyphs *ug, int gid)
 {
-    if (gid >= 0 && gid < ug->maxGlyph) {
+    if (ug && ug->flags && gid >= 0 && gid < ug->maxGlyph) {
         ug->flags[gid >> 3] |= (1 << (gid & 7));
     }
 }
 
 static int is_glyph_marked(const UsedGlyphs *ug, int gid)
 {
-    if (gid >= 0 && gid < ug->maxGlyph) {
+    if (ug && ug->flags && gid >= 0 && gid < ug->maxGlyph) {
         return (ug->flags[gid >> 3] & (1 << (gid & 7))) != 0;
     }
     return 0;
@@ -491,22 +501,21 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
 	
     pw.maxObj = 4096;
     pw.xref = (uint32_t *)calloc(pw.maxObj, sizeof(uint32_t));
-    if (!pw.xref) {
-        fprintf(stderr, "out of memory\n");
-        abort();
-    }
+    if (!pw.xref) goto fail_oom;
 
     ptW = L->pageWidth * 0.75f;
     ptH = L->pageHeight * 0.75f;
 
     /* 1. Track used glyphs per font across all pages */
-    usedGlyphs = (UsedGlyphs *)calloc(fontCount, sizeof(UsedGlyphs));
-    fontType0Objs = (int *)calloc(fontCount, sizeof(int));
+    usedGlyphs = (UsedGlyphs *)calloc(fontCount > 0 ? fontCount : 1, sizeof(UsedGlyphs));
+    fontType0Objs = (int *)calloc(fontCount > 0 ? fontCount : 1, sizeof(int));
+    if (!usedGlyphs || !fontType0Objs) goto fail_oom;
     for (f = 0; f < fontCount; f++) {
         Font *fnt = font_by_id(f);
         if (fnt && fnt->numGlyphs > 0) {
+            usedGlyphs[f].flags = (uint8_t *)calloc((size_t)(fnt->numGlyphs + 7) / 8, 1);
+            if (!usedGlyphs[f].flags) goto fail_oom;
             usedGlyphs[f].maxGlyph = fnt->numGlyphs;
-            usedGlyphs[f].flags = (uint8_t *)calloc((fnt->numGlyphs + 7) / 8, 1);
             mark_glyph(&usedGlyphs[f], 0); /* always mark .notdef */
         }
     }
@@ -544,13 +553,22 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
         }
 
         imageObjs = (int *)calloc(nimgs > 0 ? nimgs : 1, sizeof(int));
+        if (!imageObjs) goto fail_oom;
         for (i = 0; i < nimgs; i++) {
             Image *img = imgs[i];
             size_t total = (size_t)img->w * img->h;
-            uint8_t *rgb = (uint8_t *)malloc(total * 3);
-            uint8_t *alpha = img->hasAlpha ? (uint8_t *)malloc(total) : NULL;
+            uint8_t *rgb;
+            uint8_t *alpha = NULL;
             int maskObj = 0;
             size_t pxIdx;
+
+            if (total > SIZE_MAX / 3) goto fail_oom;
+            rgb = (uint8_t *)malloc(total * 3);
+            if (!rgb) goto fail_oom;
+            if (img->hasAlpha) {
+                alpha = (uint8_t *)malloc(total);
+                if (!alpha) { free(rgb); goto fail_oom; }
+            }
 
             for (pxIdx = 0; pxIdx < total; pxIdx++) {
                 uint32_t c = img->pixels[pxIdx];
@@ -592,7 +610,7 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
         if (!fnt || !usedGlyphs[f].flags) continue;
 
         fontFileData = build_subset_font(fnt, &usedGlyphs[f], &fontFileSize);
-        if (!fontFileData || fontFileSize == 0) continue;
+        if (!fontFileData || fontFileSize == 0) { free(fontFileData); continue; }
 
         format_subset_font_name(fnt, f, subsetName, sizeof(subsetName));
 
@@ -727,16 +745,13 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
     /* 4. Pages and Content Streams */
     pw.pageCount = L->npages;
     pw.pageObjs  = (int *)calloc(L->npages > 0 ? L->npages : 1, sizeof(int));
-    if (!pw.pageObjs) {
-        fprintf(stderr, "out of memory\n");
-        abort();
-    }
+    if (!pw.pageObjs) goto fail_oom;
     pagesObj     = ++pw.nextObj; /* Reserve object ID for Pages catalog */
-    ensure_xref_capacity(&pw, pagesObj);
+    if (ensure_xref_capacity(&pw, pagesObj) != 0) goto fail_oom;
     /* Pre-assign page object IDs so forward #anchor links resolve accurately */
     for (p = 0; p < pw.pageCount; p++) {
         pw.pageObjs[p] = ++pw.nextObj;
-        ensure_xref_capacity(&pw, pw.pageObjs[p]);
+        if (ensure_xref_capacity(&pw, pw.pageObjs[p]) != 0) goto fail_oom;
     }
 
     for (p = 0; p < L->npages; p++) {
@@ -990,6 +1005,8 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
     buf_puts(&pw.buf, " >>\n");
     pdf_end_obj(&pw);
 
+    if (pw.oom) goto fail_oom;
+
     /* 7. Cross-reference Table & Trailer */
     {
         uint32_t xrefStart = (uint32_t)pw.buf.n;
@@ -1018,6 +1035,19 @@ int pdf_write(const Layout *L, const char *path, char *err, int errcap)
     }
     buf_free(&pw.buf);
     return 0;
+
+fail_oom:
+    if (usedGlyphs) {
+        for (f = 0; f < fontCount; f++) free(usedGlyphs[f].flags);
+        free(usedGlyphs);
+    }
+    free(fontType0Objs);
+    free(imageObjs);
+    free(pw.pageObjs);
+    free(pw.xref);
+    buf_free(&pw.buf);
+    if (err && errcap > 0) strncpy_s(err, (size_t)errcap, "Out of memory", _TRUNCATE);
+    return -1;
 }
 
 int export_pdf(Doc *doc, const char *path, char *err, int errcap)

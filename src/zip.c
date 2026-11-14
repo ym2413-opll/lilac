@@ -75,6 +75,17 @@ int zip_add(ZipWriter *z, const char *name, const void *data, size_t len, int co
     if (e->method == 8) e->csize = (uint32_t)clen;
     else e->csize = (uint32_t)len;
 
+    {
+        size_t payloadLen = (e->method == 8) ? clen : len;
+        size_t entryBytes = 30u + nlen + payloadLen;
+        if (entryBytes > 0xFFFFFFFFu || z->data.n > (size_t)0xFFFFFFFFu - entryBytes) {
+            free(comp);
+            free(e->name);
+            z->n--;
+            return -1;
+        }
+    }
+
     put32(&z->data, 0x04034b50);
     put16(&z->data, 20);              /* version needed */
     put16(&z->data, 0x0800);          /* flags: UTF-8 names */
@@ -95,8 +106,13 @@ int zip_add(ZipWriter *z, const char *name, const void *data, size_t len, int co
 
 int zip_close(ZipWriter *z, const char *path)
 {
-    uint32_t cdStart = (uint32_t)z->data.n, cdSize;
+    uint32_t cdStart, cdSize;
     int i, rc;
+    if (!z || !path || z->data.n > 0xFFFFFFFFu) {
+        zip_discard(z);
+        return -1;
+    }
+    cdStart = (uint32_t)z->data.n;
     for (i = 0; i < z->n; i++) {
         ZipEntry *e = &z->ent[i];
         size_t nlen = strlen(e->name);
@@ -119,7 +135,11 @@ int zip_close(ZipWriter *z, const char *path)
         put32(&z->data, e->offset);
         buf_put(&z->data, e->name, nlen);
     }
-    cdSize = (uint32_t)z->data.n - cdStart;
+    if (z->data.n < (size_t)cdStart || z->data.n - (size_t)cdStart > 0xFFFFFFFFu || z->data.n > 0xFFFFFFFFu) {
+        zip_discard(z);
+        return -1;
+    }
+    cdSize = (uint32_t)(z->data.n - (size_t)cdStart);
     put32(&z->data, 0x06054b50);
     put16(&z->data, 0);
     put16(&z->data, 0);
