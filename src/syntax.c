@@ -344,12 +344,43 @@ static const char *const g_sql_builtins[] = {
 /* Shell / Bash */
 static const char *const g_sh_keywords[] = {
     "if", "then", "else", "elif", "fi", "for", "in", "do", "done",
-    "while", "until", "case", "esac", "function", "return", "exit",
-    "echo", "export", "local", "alias", "read", "cd", "test", "set",
-    "unset", "shift", "source", "eval", NULL
+    "while", "until", "case", "esac", "select", "function", "return",
+    "exit", "break", "continue", "time", "coproc", NULL
 };
 static const char *const g_sh_builtins[] = {
-    "true", "false", NULL
+    "true", "false", "echo", "printf", "export", "local", "declare",
+    "typeset", "readonly", "alias", "unalias", "read", "cd", "pwd",
+    "pushd", "popd", "dirs", "test", "set", "unset", "shift", "source",
+    "eval", "exec", "trap", "wait", "kill", "jobs", "bg", "fg", "umask",
+    "ulimit", "type", "command", "builtin", "let", "getopts", "shopt",
+    "mapfile", "readarray", "history", "hash", "help", "logout", "enable",
+    "times", "suspend", NULL
+};
+static const char *const g_sh_commands[] = {
+    "ls", "cp", "mv", "rm", "mkdir", "rmdir", "touch", "cat", "head",
+    "tail", "less", "more", "grep", "egrep", "fgrep", "sed", "awk",
+    "cut", "sort", "uniq", "wc", "tr", "find", "xargs", "chmod", "chown",
+    "chgrp", "ln", "stat", "file", "df", "du", "free", "ps", "top",
+    "htop", "killall", "pkill", "pgrep", "tar", "gzip", "gunzip", "bzip2",
+    "xz", "zip", "unzip", "curl", "wget", "ssh", "scp", "sftp", "rsync",
+    "ping", "netstat", "ss", "ip", "ifconfig", "dig", "nslookup", "nc",
+    "git", "docker", "podman", "kubectl", "helm", "sudo", "su", "env",
+    "which", "whereis", "date", "sleep", "seq", "basename", "dirname",
+    "realpath", "readlink", "mktemp", "tee", "diff", "patch", "cmp",
+    "comm", "md5sum", "sha256sum", "base64", "jq", "yq", "make", "cmake",
+    "ninja", "gcc", "clang", "cc", "ld", "ar", "python", "python3", "pip",
+    "pip3", "node", "npm", "npx", "yarn", "pnpm", "go", "cargo", "rustc",
+    "java", "javac", "apt", "apt-get", "dpkg", "yum", "dnf", "rpm",
+    "pacman", "brew", "apk", "systemctl", "service", "journalctl",
+    "crontab", "mount", "umount", "dd", "fdisk", "lsblk", "uname",
+    "hostname", "whoami", "id", "groups", "uptime", "dmesg", "clear",
+    "expr", "bc", "yes", "nohup", "timeout", "watch", NULL
+};
+static const char *const g_sh_test_ops[] = {
+    "-eq", "-ne", "-lt", "-le", "-gt", "-ge", "-ef", "-nt", "-ot",
+    "-a", "-o", "-z", "-n", "-e", "-f", "-d", "-r", "-w", "-x",
+    "-s", "-L", "-h", "-b", "-c", "-p", "-S", "-u", "-g", "-k",
+    "-O", "-G", "-t", "-v", NULL
 };
 
 /* PowerShell */
@@ -461,7 +492,13 @@ static SynLang detect_lang(const char *lang)
     if (strcmp(buf, "css") == 0 || strcmp(buf, "scss") == 0 || strcmp(buf, "sass") == 0 || strcmp(buf, "less") == 0) return LANG_CSS;
     if (strcmp(buf, "sql") == 0 || strcmp(buf, "mysql") == 0 || strcmp(buf, "pgsql") == 0 ||
         strcmp(buf, "postgres") == 0 || strcmp(buf, "sqlite") == 0) return LANG_SQL;
-    if (strcmp(buf, "sh") == 0 || strcmp(buf, "bash") == 0 || strcmp(buf, "zsh") == 0 || strcmp(buf, "shell") == 0) return LANG_SHELL;
+    if (strcmp(buf, "sh") == 0 || strcmp(buf, "bash") == 0 || strcmp(buf, "zsh") == 0 ||
+        strcmp(buf, "shell") == 0 || strcmp(buf, "shellscript") == 0 ||
+        strcmp(buf, "shell-script") == 0 || strcmp(buf, "ksh") == 0 ||
+        strcmp(buf, "dash") == 0 || strcmp(buf, "ash") == 0 || strcmp(buf, "fish") == 0 ||
+        strcmp(buf, "console") == 0 || strcmp(buf, "bashrc") == 0 || strcmp(buf, "zshrc") == 0) {
+        return LANG_SHELL;
+    }
     if (strcmp(buf, "ps1") == 0 || strcmp(buf, "powershell") == 0 || strcmp(buf, "ps") == 0) return LANG_POWERSHELL;
     if (strcmp(buf, "bat") == 0 || strcmp(buf, "batch") == 0 || strcmp(buf, "cmd") == 0) return LANG_BATCH;
     if (strcmp(buf, "yaml") == 0 || strcmp(buf, "yml") == 0) return LANG_YAML;
@@ -1115,6 +1152,349 @@ static void tokenize_sql(TokBuf *tb, const char *text, int len)
     }
 }
 
+static int is_sh_delim(char c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n' ||
+           c == ';' || c == '|' || c == '&' || c == '(' || c == ')' ||
+           c == '{' || c == '}' || c == '[' || c == ']' ||
+           c == '<' || c == '>' || c == '=';
+}
+
+static int sh_scan_var(const char *text, int len, int i)
+{
+    /* text[i] == '$' */
+    i++;
+    if (i >= len) return i;
+    if (text[i] == '{') {
+        int depth = 1;
+        i++;
+        while (i < len && depth > 0) {
+            if (text[i] == '\\' && i + 1 < len) { i += 2; continue; }
+            if (text[i] == '{') depth++;
+            else if (text[i] == '}') depth--;
+            i++;
+        }
+        return i;
+    }
+    if ((text[i] && strchr("?#@*$!-_", text[i])) || is_digit(text[i])) {
+        return i + 1;
+    }
+    if ((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z') || text[i] == '_') {
+        while (i < len && ((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z') ||
+                           is_digit(text[i]) || text[i] == '_')) {
+            i++;
+        }
+        return i;
+    }
+    return i;
+}
+
+static void tokenize_sh(TokBuf *tb, const char *text, int len)
+{
+    int i = 0;
+    char heredocDelim[64];
+    int heredocStripTabs = 0;
+    heredocDelim[0] = '\0';
+
+    while (i < len) {
+        char c = text[i];
+
+        /* Handle pending here-document body right after newline */
+        if (c == '\n' || c == '\r') {
+            if (c == '\r' && i + 1 < len && text[i + 1] == '\n') i += 2;
+            else i++;
+
+            if (heredocDelim[0]) {
+                int dlen = (int)strlen(heredocDelim);
+                int bodyStart = i;
+                while (i < len) {
+                    int lineStart = i;
+                    int cmpStart = i;
+                    int lineEnd;
+                    if (heredocStripTabs) {
+                        while (cmpStart < len && text[cmpStart] == '\t') cmpStart++;
+                    }
+                    lineEnd = cmpStart;
+                    while (lineEnd < len && text[lineEnd] != '\n' && text[lineEnd] != '\r') lineEnd++;
+
+                    if (lineEnd - cmpStart == dlen && memcmp(text + cmpStart, heredocDelim, (size_t)dlen) == 0) {
+                        if (lineStart > bodyStart) {
+                            tb_add(tb, bodyStart, lineStart - bodyStart, SYN_STRING);
+                        }
+                        tb_add(tb, cmpStart, dlen, SYN_PREPROC);
+                        i = lineEnd;
+                        if (i < len && text[i] == '\r') i++;
+                        if (i < len && text[i] == '\n') i++;
+                        heredocDelim[0] = '\0';
+                        break;
+                    }
+                    i = lineEnd;
+                    if (i < len && text[i] == '\r') i++;
+                    if (i < len && text[i] == '\n') i++;
+                }
+                if (heredocDelim[0]) {
+                    if (i > bodyStart) tb_add(tb, bodyStart, i - bodyStart, SYN_STRING);
+                    heredocDelim[0] = '\0';
+                }
+            }
+            continue;
+        }
+
+        if (c == ' ' || c == '\t') { i++; continue; }
+
+        /* Shebang #!... at start of script */
+        if (i == 0 && c == '#' && i + 1 < len && text[i + 1] == '!') {
+            int start = i;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
+            tb_add(tb, start, i - start, SYN_PREPROC);
+            continue;
+        }
+
+        /* Comment # (only at start of line or after whitespace/delimiter) */
+        if (c == '#' && (i == 0 || is_sh_delim(text[i - 1]))) {
+            int start = i++;
+            while (i < len && text[i] != '\n' && text[i] != '\r') i++;
+            tb_add(tb, start, i - start, SYN_COMMENT);
+            continue;
+        }
+
+        /* ANSI-C quoting $'...' */
+        if (c == '$' && i + 1 < len && text[i + 1] == '\'') {
+            int start = i;
+            i += 2;
+            while (i < len && text[i] != '\'') {
+                if (text[i] == '\\' && i + 1 < len) i += 2;
+                else i++;
+            }
+            if (i < len && text[i] == '\'') i++;
+            tb_add(tb, start, i - start, SYN_STRING);
+            continue;
+        }
+
+        /* Single-quoted string '...' (no backslash escaping in POSIX shell) */
+        if (c == '\'') {
+            int start = i++;
+            while (i < len && text[i] != '\'') i++;
+            if (i < len && text[i] == '\'') i++;
+            tb_add(tb, start, i - start, SYN_STRING);
+            continue;
+        }
+
+        /* Double-quoted string "..." with $VAR / ${VAR} interpolation */
+        if (c == '"') {
+            int segStart = i++;
+            while (i < len && text[i] != '"') {
+                if (text[i] == '\\' && i + 1 < len) {
+                    i += 2;
+                    continue;
+                }
+                if (text[i] == '$' && i + 1 < len && text[i + 1] != '"' && text[i + 1] != ' ' &&
+                    text[i + 1] != '\t' && text[i + 1] != '\n' && text[i + 1] != '\r' && text[i + 1] != '(') {
+                    int vEnd = sh_scan_var(text, len, i);
+                    if (vEnd > i + 1) {
+                        if (i > segStart) tb_add(tb, segStart, i - segStart, SYN_STRING);
+                        tb_add(tb, i, vEnd - i, SYN_TYPE);
+                        i = vEnd;
+                        segStart = i;
+                        continue;
+                    }
+                }
+                i++;
+            }
+            if (i < len && text[i] == '"') i++;
+            if (i > segStart) tb_add(tb, segStart, i - segStart, SYN_STRING);
+            continue;
+        }
+
+        /* Backtick command substitution `...` */
+        if (c == '`') {
+            int start = i++;
+            while (i < len && text[i] != '`') {
+                if (text[i] == '\\' && i + 1 < len) i += 2;
+                else i++;
+            }
+            if (i < len && text[i] == '`') i++;
+            tb_add(tb, start, i - start, SYN_STRING);
+            continue;
+        }
+
+        /* Arithmetic expansion $(( and command substitution $( */
+        if (c == '$' && i + 1 < len && text[i + 1] == '(') {
+            if (i + 2 < len && text[i + 2] == '(') {
+                tb_add(tb, i, 3, SYN_OPERATOR);
+                i += 3;
+            } else {
+                tb_add(tb, i, 2, SYN_OPERATOR);
+                i += 2;
+            }
+            continue;
+        }
+
+        /* Variable expansion: $VAR, ${VAR}, $?, $#, $@, $1, ... */
+        if (c == '$') {
+            int start = i;
+            int vEnd = sh_scan_var(text, len, i);
+            if (vEnd > start + 1) {
+                tb_add(tb, start, vEnd - start, SYN_TYPE);
+                i = vEnd;
+            } else {
+                tb_add(tb, start, 1, SYN_OPERATOR);
+                i++;
+            }
+            continue;
+        }
+
+        /* Here-document <<EOF / <<-EOF and here-string <<< */
+        if (c == '<' && i + 1 < len && text[i + 1] == '<') {
+            if (i + 2 < len && text[i + 2] == '<') {
+                tb_add(tb, i, 3, SYN_OPERATOR);
+                i += 3;
+                continue;
+            }
+            {
+                int opLen = 2;
+                int stripTabs = 0;
+                int p;
+                if (i + 2 < len && text[i + 2] == '-') {
+                    opLen = 3;
+                    stripTabs = 1;
+                }
+                tb_add(tb, i, opLen, SYN_OPERATOR);
+                i += opLen;
+                p = i;
+                while (p < len && (text[p] == ' ' || text[p] == '\t')) p++;
+                if (p < len && text[p] != '\n' && text[p] != '\r' && !heredocDelim[0]) {
+                    int q = 0;
+                    int dStart = p;
+                    int dLen = 0;
+                    if (text[p] == '\'' || text[p] == '"') {
+                        q = text[p++];
+                        dStart = p;
+                        while (p < len && text[p] != q && text[p] != '\n' && text[p] != '\r') p++;
+                        dLen = p - dStart;
+                        if (p < len && text[p] == q) p++;
+                    } else if (text[p] == '\\' && p + 1 < len) {
+                        p++;
+                        dStart = p;
+                        while (p < len && !is_sh_delim(text[p])) p++;
+                        dLen = p - dStart;
+                    } else {
+                        while (p < len && !is_sh_delim(text[p])) p++;
+                        dLen = p - dStart;
+                    }
+                    if (dLen > 0 && dLen < (int)sizeof(heredocDelim)) {
+                        memcpy(heredocDelim, text + dStart, (size_t)dLen);
+                        heredocDelim[dLen] = '\0';
+                        heredocStripTabs = stripTabs;
+                        tb_add(tb, i + (dStart - i - (q ? 1 : 0)), p - (dStart - (q ? 1 : 0)), SYN_PREPROC);
+                        i = p;
+                    }
+                }
+                continue;
+            }
+        }
+
+        /* Command options/flags and test operators (-eq, -f, --verbose, -rf) */
+        if (c == '-' && (i == 0 || text[i - 1] == ' ' || text[i - 1] == '\t' || text[i - 1] == '[' || text[i - 1] == '(')) {
+            if (i + 1 < len && (is_alnum(text[i + 1]) || text[i + 1] == '-')) {
+                int start = i++;
+                int tokLen;
+                while (i < len && (is_alnum(text[i]) || text[i] == '-' || text[i] == '_')) i++;
+                tokLen = i - start;
+                if (is_in_list(text + start, tokLen, g_sh_test_ops)) {
+                    tb_add(tb, start, tokLen, SYN_OPERATOR);
+                } else {
+                    tb_add(tb, start, tokLen, SYN_PREPROC);
+                }
+                continue;
+            }
+        }
+
+        /* Identifiers, keywords, builtins, commands, assignments, function definitions */
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '_') {
+            int start = i;
+            int tokLen;
+            int isVarName = 1;
+            int prevIsDelim = (i == 0 || is_sh_delim(text[i - 1]));
+            while (i < len && ((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z') ||
+                               is_digit(text[i]) || text[i] == '_' || text[i] == '-')) {
+                if (text[i] == '-') isVarName = 0;
+                i++;
+            }
+            tokLen = i - start;
+
+            /* Variable assignment: VAR= or VAR+= */
+            if (prevIsDelim && isVarName && i < len &&
+                (text[i] == '=' || (text[i] == '+' && i + 1 < len && text[i + 1] == '='))) {
+                tb_add(tb, start, tokLen, SYN_TYPE);
+                continue;
+            }
+
+            /* Function definition: name() */
+            {
+                int p = i;
+                while (p < len && (text[p] == ' ' || text[p] == '\t')) p++;
+                if (prevIsDelim && p + 1 < len && text[p] == '(' && text[p + 1] == ')') {
+                    tb_add(tb, start, tokLen, SYN_FUNCTION);
+                    continue;
+                }
+            }
+
+            /* Don't highlight path segments like /usr/bin/echo as keywords */
+            if (prevIsDelim && (i >= len || is_sh_delim(text[i]))) {
+                if (is_in_list(text + start, tokLen, g_sh_keywords)) {
+                    tb_add(tb, start, tokLen, SYN_KEYWORD);
+                    continue;
+                }
+                if (is_in_list(text + start, tokLen, g_sh_builtins)) {
+                    tb_add(tb, start, tokLen, SYN_BUILTIN);
+                    continue;
+                }
+                if (is_in_list(text + start, tokLen, g_sh_commands)) {
+                    tb_add(tb, start, tokLen, SYN_FUNCTION);
+                    continue;
+                }
+            }
+            continue;
+        }
+
+        /* Numbers */
+        if (is_digit(c) && (i == 0 || is_sh_delim(text[i - 1]) || text[i - 1] == '+' || text[i - 1] == '-' || text[i - 1] == ',')) {
+            int start = i++;
+            if (c == '0' && i < len && (text[i] == 'x' || text[i] == 'X')) {
+                i++;
+                while (i < len && is_hex(text[i])) i++;
+            } else {
+                while (i < len && (is_digit(text[i]) || text[i] == '.')) i++;
+            }
+            tb_add(tb, start, i - start, SYN_NUMBER);
+            continue;
+        }
+
+        /* Multi-character and single-character shell operators */
+        if (c && strchr("|&;><=(){}[]!", c)) {
+            int start = i++;
+            if (i < len) {
+                char n = text[i];
+                if ((c == '&' && n == '&') || (c == '|' && n == '|') ||
+                    (c == ';' && n == ';') || (c == '>' && n == '>') ||
+                    (c == '=' && (n == '=' || n == '~')) ||
+                    (c == '!' && n == '=') ||
+                    (c == '[' && n == '[') || (c == ']' && n == ']') ||
+                    (c == '(' && n == '(') || (c == ')' && n == ')') ||
+                    ((c == '>' || c == '<') && n == '&') ||
+                    (c == '&' && n == '>') || (c == '|' && n == '&')) {
+                    i++;
+                }
+            }
+            tb_add(tb, start, i - start, SYN_OPERATOR);
+            continue;
+        }
+
+        i++;
+    }
+}
+
 static void tokenize_shell(TokBuf *tb, const char *text, int len, SynLang lang)
 {
     int i = 0;
@@ -1528,6 +1908,8 @@ SynToken *syntax_highlight(const char *lang, const char *text, int textlen, int 
         tokenize_sql(&tb, text, textlen);
         break;
     case LANG_SHELL:
+        tokenize_sh(&tb, text, textlen);
+        break;
     case LANG_POWERSHELL:
     case LANG_BATCH:
         tokenize_shell(&tb, text, textlen, l);

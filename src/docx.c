@@ -31,6 +31,8 @@ static void sanitize_bookmark(const char *slug, char *out, int maxlen)
     out[o] = 0;
 }
 
+#define MAX_DOCX_DEPTH 128
+
 typedef struct DocxCtx {
     Doc      *doc;
     ZipWriter *z;
@@ -41,6 +43,7 @@ typedef struct DocxCtx {
     int       nextBookmarkId;
     int       hasFootnotes;
     int       numInstances;
+    int       depth;
     struct {
         Image *img;
         int    relId;
@@ -250,7 +253,8 @@ static void docx_put_code_run(Buf *b, const char *text, int len, uint32_t col, i
 /* Recursive block emitter */
 static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int listLvl, int inQuote)
 {
-    if (!blk) return;
+    if (!blk || ctx->depth >= MAX_DOCX_DEPTH) return;
+    ctx->depth++;
 
     switch (blk->type) {
     case BK_DOCUMENT: {
@@ -513,6 +517,7 @@ static void emit_block(DocxCtx *ctx, Buf *b, Block *blk, int listNumId, int list
     default:
         break;
     }
+    ctx->depth--;
 }
 
 int docx_write(Doc *doc, const char *path, char *err, int errcap)

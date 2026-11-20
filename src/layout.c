@@ -64,6 +64,8 @@ static const Theme g_dark = {
 };
 
 /* ---------------- Context ---------------- */
+#define MAX_LAYOUT_DEPTH 128
+
 typedef struct LayCtx {
     Layout        *L;
     const Theme   *th;
@@ -73,6 +75,7 @@ typedef struct LayCtx {
     float          pageTop, pageBottom, pageH;
     int            isPaged;
     float          baseSize;
+    int            depth;
     int            trackFirstLine;
     int            firstLineFound;
     int            firstLinePage;
@@ -357,7 +360,8 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
     int glyphCap = 64, nGlyphs = 0;
     int r, i;
     float defaultAscent = 0, defaultDescent = 0, defaultLineH = 0;
-    Font *bodyFont = font_primary(FAM_BODY, 0, 0);
+    int defaultFam = (nruns > 0 && (runs[0].style & ST_BLOCKCODE)) ? FAM_MONO : FAM_BODY;
+    Font *bodyFont = font_primary(defaultFam, 0, 0);
 
     glyphs = (GlyphInfo *)malloc((size_t)glyphCap * sizeof(GlyphInfo));
     if (!glyphs) return;
@@ -629,6 +633,7 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
                     int runLen = runEnd - runStart;
                     float sz = baseFontSize;
                     float drawBaseline = baseline;
+                    int itIdx;
                     Item *it;
 
                     if (g0->style & (ST_SUP | ST_SUB)) {
@@ -640,6 +645,7 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
                         sz *= 0.9f;
                     }
 
+                    itIdx = L->nitems;
                     it = add_item(ctx, IT_GLYPHS, 1);
                     it->x = lx;
                     it->y = drawBaseline;
@@ -653,6 +659,15 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
                     it->gids = (uint16_t *)arena_alloc(&L->arena, (size_t)runLen * sizeof(uint16_t));
                     it->dx = (float *)arena_alloc(&L->arena, (size_t)runLen * sizeof(float));
                     it->toff = (int *)arena_alloc(&L->arena, (size_t)runLen * sizeof(int));
+
+                    curX = 0;
+                    for (g = 0; g < runLen; g++) {
+                        it->gids[g] = glyphs[runStart + g].gid;
+                        it->dx[g] = curX;
+                        it->toff[g] = ltext_put_cp(L, glyphs[runStart + g].cp);
+                        curX += glyphs[runStart + g].adv;
+                    }
+                    it->tend = L->textlen;
 
                     if (g0->style & ST_MARK) {
                         /* Highlight background */
@@ -679,15 +694,7 @@ static void layout_inline_runs(LayCtx *ctx, const Run *runs, int nruns, float x0
                     if (g0->link >= 0) {
                         add_link_area(ctx, lx, baseline - line->ascent, runW, line->ascent + line->descent, g0->link);
                     }
-
-                    curX = 0;
-                    for (g = 0; g < runLen; g++) {
-                        it->gids[g] = glyphs[runStart + g].gid;
-                        it->dx[g] = curX;
-                        it->toff[g] = ltext_put_cp(L, glyphs[runStart + g].cp);
-                        curX += glyphs[runStart + g].adv;
-                    }
-                    it->tend = L->textlen;
+                    (void)itIdx;
 
                     /* Strike-through and underline */
                     if (g0->style & ST_STRIKE) {
@@ -762,8 +769,12 @@ static void cr_add(CodeRunList *list, const char *text, int len, SynTokType type
     Run *r;
     if (len <= 0) return;
     if (list->count == list->cap) {
-        int newCap = list->cap * 2;
-        Run *newBuf = (Run *)malloc((size_t)newCap * sizeof(Run));
+        int newCap;
+        Run *newBuf;
+        if (list->cap > INT_MAX / 2) return;
+        newCap = list->cap * 2;
+        if ((size_t)newCap > SIZE_MAX / sizeof(Run)) return;
+        newBuf = (Run *)malloc((size_t)newCap * sizeof(Run));
         if (!newBuf) return;
         memcpy(newBuf, list->runs, (size_t)list->count * sizeof(Run));
         if (list->runs != list->stackRuns) free(list->runs);
@@ -774,6 +785,7 @@ static void cr_add(CodeRunList *list, const char *text, int len, SynTokType type
     memset(r, 0, sizeof(Run));
     r->type = RN_TEXT;
     r->style = ST_BLOCKCODE;
+    r->link = -1;
     if (type == SYN_COMMENT) r->style |= ST_ITALIC;
     r->color = syntax_token_color(cols, type);
     r->text = (char *)text;
@@ -791,7 +803,8 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
 {
     const Theme *th = ctx->th;
 
-    if (!b) return;
+    if (!b || ctx->depth >= MAX_LAYOUT_DEPTH) return;
+    ctx->depth++;
 
     switch (b->type) {
     case BK_DOCUMENT:
@@ -946,6 +959,7 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
             Run trun = {0};
             trun.type = RN_TEXT;
             trun.style = ST_BOLD;
+            trun.link = -1;
             trun.text = (char *)title;
             trun.len = (int)strlen(title);
             layout_inline_runs(ctx, &trun, 1, x + pad, w - pad * 2, AL_DEFAULT, ctx->baseSize, 1.3f, NULL);
@@ -1040,6 +1054,7 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
                 Run nrun = {0};
                 snprintf(numStr, sizeof(numStr), "%d.", b->start + i);
                 nrun.type = RN_TEXT;
+                nrun.link = -1;
                 nrun.text = numStr;
                 nrun.len = (int)strlen(numStr);
                 layout_inline_runs(ctx, &nrun, 1, x, bulletW, AL_RIGHT, ctx->baseSize, 1.4f, NULL);
@@ -1114,10 +1129,14 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
     case BK_CODE: {
         float pad = 10.0f;
         float startY;
+        int startPage;
+        int bgIdx, borderIdx;
         int lineCount = 1, i;
         float codeSize = ctx->baseSize * 0.90f;
         Font *mf = font_primary(FAM_MONO, 0, 0);
-        float lineH = (float)(mf->ascent + mf->descent) * codeSize * 1.35f / (float)mf->upem;
+        float lineH = (mf && mf->upem > 0)
+            ? (float)(mf->ascent + mf->descent) * codeSize * 1.35f / (float)mf->upem
+            : codeSize * 1.35f;
         float totalH;
         Item *bg;
         Item *border;
@@ -1133,6 +1152,9 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
         check_page_space(ctx, min(totalH, ctx->baseSize * 4.0f));
 
         startY = ctx->curY;
+        startPage = ctx->curPage;
+
+        bgIdx = L->nitems;
         bg = add_item(ctx, IT_FILL, 0);
         bg->x = x;
         bg->y = startY;
@@ -1141,6 +1163,7 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
         bg->radius = 6.0f;
         bg->color = th->codeBg;
 
+        borderIdx = L->nitems;
         border = add_item(ctx, IT_STROKE, 1);
         border->x = x;
         border->y = startY;
@@ -1158,11 +1181,29 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
             int tokIdx = 0;
             while (lineStart < b->textlen) {
                 int lineEnd = lineStart;
+                float prevY = ctx->curY;
                 while (lineEnd < b->textlen && b->text[lineEnd] != '\n' && b->text[lineEnd] != '\r') lineEnd++;
 
                 if (lineStart == lineEnd) {
                     /* Blank line */
                     check_page_space(ctx, lineH);
+                    if (ctx->curPage != startPage) {
+                        float prevH = prevY + pad - startY;
+                        if (ctx->isPaged && prevH > ctx->pageBottom - startY) prevH = ctx->pageBottom - startY;
+                        L->items[bgIdx].h = prevH;
+                        L->items[borderIdx].h = prevH;
+                        startY = ctx->curY;
+                        startPage = ctx->curPage;
+                        bgIdx = L->nitems;
+                        bg = add_item(ctx, IT_FILL, 0);
+                        bg->x = x; bg->y = startY; bg->w = w; bg->h = pad * 2 + lineH;
+                        bg->radius = 6.0f; bg->color = th->codeBg;
+                        borderIdx = L->nitems;
+                        border = add_item(ctx, IT_STROKE, 1);
+                        border->x = x; border->y = startY; border->w = w; border->h = pad * 2 + lineH;
+                        border->radius = 6.0f; border->lw = 1.0f; border->color = th->codeBorder;
+                        ctx->curY += pad;
+                    }
                     ctx->curY += lineH;
                     if (L->text && L->textlen > 0 && L->text[L->textlen - 1] != '\n') {
                         ltext_put_cp(L, '\n');
@@ -1204,7 +1245,42 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
                     }
 
                     if (crl.count > 0) {
+                        if (ctx->isPaged && ctx->curY + lineH > ctx->pageBottom && ctx->curY > ctx->pageTop) {
+                            float prevH = prevY + pad - startY;
+                            if (prevH > ctx->pageBottom - startY) prevH = ctx->pageBottom - startY;
+                            L->items[bgIdx].h = prevH;
+                            L->items[borderIdx].h = prevH;
+                            ctx->curPage++;
+                            ctx->curY = ctx->pageTop;
+                            startY = ctx->curY;
+                            startPage = ctx->curPage;
+                            bgIdx = L->nitems;
+                            bg = add_item(ctx, IT_FILL, 0);
+                            bg->x = x; bg->y = startY; bg->w = w; bg->h = pad * 2 + lineH;
+                            bg->radius = 6.0f; bg->color = th->codeBg;
+                            borderIdx = L->nitems;
+                            border = add_item(ctx, IT_STROKE, 1);
+                            border->x = x; border->y = startY; border->w = w; border->h = pad * 2 + lineH;
+                            border->radius = 6.0f; border->lw = 1.0f; border->color = th->codeBorder;
+                            ctx->curY += pad;
+                        }
                         layout_inline_runs(ctx, crl.runs, crl.count, x + pad, w - pad * 2, AL_DEFAULT, codeSize, 1.35f, NULL);
+                        if (ctx->curPage != startPage) {
+                            float prevH = prevY + pad - startY;
+                            if (ctx->isPaged && prevH > ctx->pageBottom - startY) prevH = ctx->pageBottom - startY;
+                            L->items[bgIdx].h = prevH;
+                            L->items[borderIdx].h = prevH;
+                            startY = ctx->pageTop;
+                            startPage = ctx->curPage;
+                            bgIdx = L->nitems;
+                            bg = add_item(ctx, IT_FILL, 0);
+                            bg->x = x; bg->y = startY; bg->w = w; bg->h = ctx->curY - startY;
+                            bg->radius = 6.0f; bg->color = th->codeBg;
+                            borderIdx = L->nitems;
+                            border = add_item(ctx, IT_STROKE, 1);
+                            border->x = x; border->y = startY; border->w = w; border->h = ctx->curY - startY;
+                            border->radius = 6.0f; border->lw = 1.0f; border->color = th->codeBorder;
+                        }
                     }
                     cr_free(&crl);
                 }
@@ -1218,8 +1294,8 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
         if (tokens) free(tokens);
 
         ctx->curY += pad;
-        bg->h = ctx->curY - startY;
-        border->h = ctx->curY - startY;
+        L->items[bgIdx].h = ctx->curY - startY;
+        L->items[borderIdx].h = ctx->curY - startY;
         ctx->curY += 8.0f;
         break;
     }
@@ -1325,7 +1401,7 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
             Block *tr = b->kids[r];
             float rowStartY;
             float maxCellH = 0;
-            Item *hbg = NULL;
+            int hbgIdx = -1;
             float estH = cellFontSize * 2.2f;
             int savedPaged;
 
@@ -1363,6 +1439,8 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
             }
 
             if (tr->header) {
+                Item *hbg;
+                hbgIdx = ctx->L->nitems;
                 hbg = add_item(ctx, IT_FILL, 0);
                 hbg->x = x;
                 hbg->y = rowStartY;
@@ -1387,7 +1465,7 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
             ctx->isPaged = savedPaged;
 
             if (maxCellH < 24.0f) maxCellH = 24.0f;
-            if (hbg) hbg->h = maxCellH;
+            if (hbgIdx >= 0) ctx->L->items[hbgIdx].h = maxCellH;
 
             /* Vertical borders (outer left/right + column dividers) */
             for (c = 0; c <= ncols; c++) {
@@ -1444,6 +1522,7 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
         snprintf(tag, sizeof(tag), "[%d] ", b->footnote);
         frun.type = RN_TEXT;
         frun.style = ST_BOLD;
+        frun.link = -1;
         frun.text = tag;
         frun.len = (int)strlen(tag);
         if (b->anchor) add_anchor(ctx, b->anchor, NULL, 0, ctx->curY);
@@ -1456,6 +1535,7 @@ static void layout_block(LayCtx *ctx, Block *b, float x, float w)
         layout_children(ctx, b, x, w, 6.0f);
         break;
     }
+    ctx->depth--;
 }
 
 /* ---------------- Public API ---------------- */
@@ -1536,57 +1616,69 @@ int layout_hit_link(const Layout *L, int page, float x, float y)
     return -1;
 }
 
+static int hit_glyph_item(const Item *it, float x)
+{
+    int g;
+    float cur;
+    if (x <= it->x) return it->toff[0];
+    if (x >= it->x + it->w) return it->tend;
+    cur = it->x;
+    for (g = 0; g < it->n; g++) {
+        float gw = (g + 1 < it->n ? it->dx[g + 1] : it->w) - it->dx[g];
+        if (x <= cur + gw * 0.6f) return it->toff[g];
+        cur += gw;
+    }
+    return it->tend;
+}
+
 int layout_hit_text(const Layout *L, int page, float x, float y)
 {
-    int i, g;
+    int i;
+    int lineBestItem = -1;
+    float lineBestDx = 1e9f;
     int bestItem = -1;
     float bestDy = 1e9f;
+    float bestDx = 1e9f;
     if (!L || L->textlen == 0) return -1;
 
-    /* 1. First pass: look for exact line hit */
+    /* Scan all glyph items on this page */
     for (i = 0; i < L->nitems; i++) {
         const Item *it = &L->items[i];
         if (it->type == IT_GLYPHS && it->page == page && it->n > 0) {
             float top = it->y - it->size;
             float bottom = it->y + it->size * 0.45f;
+            float dx = 0.0f;
+            if (x < it->x) dx = it->x - x;
+            else if (x > it->x + it->w) dx = x - (it->x + it->w);
+
+            /* 1. Exact vertical line hit */
             if (y >= top && y <= bottom) {
-                if (x <= it->x) return it->toff[0];
-                if (x >= it->x + it->w) return it->tend;
-                {
-                    float cur = it->x;
-                    for (g = 0; g < it->n; g++) {
-                        float gw = (g + 1 < it->n ? it->dx[g + 1] : it->w) - it->dx[g];
-                        if (x <= cur + gw * 0.6f) return it->toff[g];
-                        cur += gw;
-                    }
+                if (dx == 0.0f) {
+                    return hit_glyph_item(it, x);
                 }
-                return it->tend;
+                if (dx < lineBestDx) {
+                    lineBestDx = dx;
+                    lineBestItem = i;
+                }
             }
-            /* Track closest item vertically */
+
+            /* 2. Track closest item vertically (and horizontally within the same line) */
             {
-                float dy = (y < top) ? (top - y) : (y - bottom);
-                if (dy < bestDy) {
-                    bestDy = dy;
+                float dy = (y < top) ? (top - y) : ((y > bottom) ? (y - bottom) : 0.0f);
+                if (dy < bestDy - 0.5f || (dy <= bestDy + 0.5f && dx < bestDx)) {
+                    if (dy < bestDy) bestDy = dy;
+                    bestDx = dx;
                     bestItem = i;
                 }
             }
         }
     }
 
-    /* 2. Second pass: fallback to closest item vertically */
+    if (lineBestItem >= 0) {
+        return hit_glyph_item(&L->items[lineBestItem], x);
+    }
     if (bestItem >= 0) {
-        const Item *it = &L->items[bestItem];
-        if (x <= it->x) return it->toff[0];
-        if (x >= it->x + it->w) return it->tend;
-        {
-            float cur = it->x;
-            for (g = 0; g < it->n; g++) {
-                float gw = (g + 1 < it->n ? it->dx[g + 1] : it->w) - it->dx[g];
-                if (x <= cur + gw * 0.6f) return it->toff[g];
-                cur += gw;
-            }
-        }
-        return it->tend;
+        return hit_glyph_item(&L->items[bestItem], x);
     }
 
     return -1;

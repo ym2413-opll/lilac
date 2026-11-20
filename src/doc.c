@@ -1807,9 +1807,12 @@ static char *resolve_image_key(Doc *doc, const char *src)
     return res;
 }
 
-static void resolve_block_images(Doc *doc, Block *b, int allowRemote)
+#define MAX_DOC_DEPTH 128
+
+static void resolve_block_images(Doc *doc, Block *b, int allowRemote, int depth)
 {
     int i;
+    if (!b || depth >= MAX_DOC_DEPTH) return;
     for (i = 0; i < b->nruns; i++) {
         Run *r = &b->runs[i];
         if (r->type == RN_IMAGE) {
@@ -1820,13 +1823,13 @@ static void resolve_block_images(Doc *doc, Block *b, int allowRemote)
             }
         }
     }
-    for (i = 0; i < b->nkids; i++) resolve_block_images(doc, b->kids[i], allowRemote);
+    for (i = 0; i < b->nkids; i++) resolve_block_images(doc, b->kids[i], allowRemote, depth + 1);
 }
 
 void doc_resolve_images(Doc *doc, int allowRemote)
 {
     if (!doc) return;
-    resolve_block_images(doc, doc->root, allowRemote);
+    resolve_block_images(doc, doc->root, allowRemote, 0);
 }
 
 void doc_free(Doc *doc)

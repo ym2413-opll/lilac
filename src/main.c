@@ -3249,7 +3249,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_HELP_ABOUT:
             MessageBoxW(hWnd,
                         L"Lilac the Markdown Viewer\n\n"
-                        L"by ym2413-opll, Version 1.4.0.\n",
+                        L"by ym2413-opll, Version 1.4.1.\n",
                         L"정보", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
@@ -3336,7 +3336,7 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         }
         if (!ascii_icmp(argv[1], "--unregister") || !ascii_icmp(argv[1], "/unregister")) {
             register_file_association(0);
-            MessageBoxW(NULL, L"Lilac *.md 파일 연결이 해제되었습니다.", L"Lilac", MB_OK | MB_ICONINFORMATION);
+            MessageBoxW(NULL, L"Lilac의 *.md 파일 연결이 해제되었습니다.", L"Lilac", MB_OK | MB_ICONINFORMATION);
             for (i = 0; i < argc; i++) free(argv[i]);
             free(argv);
             return 0;
