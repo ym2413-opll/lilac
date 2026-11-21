@@ -18,6 +18,7 @@ BEGIN
         MENUITEM SEPARATOR
         MENUITEM "PDF 내보내기(&P)...\tCtrl+P",     IDM_FILE_EXPORT_PDF
         MENUITEM "DOCX 내보내기(&D)...\tCtrl+D",    IDM_FILE_EXPORT_DOCX
+        MENUITEM "PNG 내보내기(&G)...\tCtrl+Shift+P", IDM_FILE_EXPORT_PNG
         MENUITEM SEPARATOR
         MENUITEM ".md 기본 프로그램 등록(&R)",      IDM_FILE_REGISTER
         MENUITEM ".md 연결 해제(&U)",               IDM_FILE_UNREGISTER
@@ -89,10 +90,29 @@ BEGIN
     PUSHBUTTON      "취소", IDCANCEL, 260, 162, 50, 18
 END
 
+IDD_PNG_DIALOG DIALOGEX 0, 0, 250, 145
+STYLE DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "PNG 내보내기"
+FONT 9, "맑은 고딕"
+BEGIN
+    GROUPBOX        "이미지 크기", -1, 10, 10, 230, 46
+    LTEXT           "가로 폭 (px):", -1, 20, 28, 60, 10
+    EDITTEXT        IDC_EDIT_PNG_WIDTH, 84, 26, 62, 14, ES_AUTOHSCROLL | ES_NUMBER
+    LTEXT           "(기본: 1050, 320~4096)", -1, 152, 28, 82, 10
+
+    GROUPBOX        "페이지 분할", -1, 10, 62, 230, 48
+    CONTROL         "페이지 구분 없이 한 장의 이미지로 내보내기", IDC_RADIO_PNG_CONTINUOUS, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 20, 77, 210, 12
+    CONTROL         "페이지 단위로 분할하여 여러 파일로 내보내기", IDC_RADIO_PNG_PAGED, "Button", BS_AUTORADIOBUTTON | WS_TABSTOP, 20, 92, 210, 12
+
+    DEFPUSHBUTTON   "내보내기", IDOK, 130, 118, 52, 18, WS_GROUP
+    PUSHBUTTON      "취소", IDCANCEL, 188, 118, 52, 18
+END
+
 IDR_ACCEL ACCELERATORS
 BEGIN
     "O",            IDM_FILE_OPEN,          VIRTKEY, CONTROL
     "P",            IDM_FILE_EXPORT_PDF,    VIRTKEY, CONTROL
+    "P",            IDM_FILE_EXPORT_PNG,    VIRTKEY, CONTROL, SHIFT
     "D",            IDM_FILE_EXPORT_DOCX,   VIRTKEY, CONTROL
     "S",            IDM_FILE_EXPORT_DOCX,   VIRTKEY, CONTROL
     "F",            IDM_EDIT_FIND,          VIRTKEY, CONTROL

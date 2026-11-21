@@ -89,6 +89,8 @@ typedef struct AppState {
     char     currentPath[LONG_PATH_MAX];
     float    baseSize;
     int      darkMode;
+    int      pngWidth;
+    int      pngPaged;
     int      clientW, clientH;
 
     DocPane  panes[MAX_SPLIT_PANES];
@@ -326,36 +328,62 @@ static void settings_load(void)
             font_set_family_face(FAM_MONO, buf);
         }
 
-        /* TOC preferences */
-        valSz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"TocVisible", NULL, NULL, (LPBYTE)&val, &valSz) == ERROR_SUCCESS) {
-            g_app.tocVisible = val ? 1 : 0;
-        }
-        valSz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"TocSide", NULL, NULL, (LPBYTE)&val, &valSz) == ERROR_SUCCESS) {
-            g_app.tocSide = (val == 1) ? 1 : 0;
-        }
-        valSz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"TocWidth", NULL, NULL, (LPBYTE)&val, &valSz) == ERROR_SUCCESS) {
-            int w = (int)val;
-            if (w < TOC_MIN_W) w = TOC_MIN_W;
-            if (w > TOC_MAX_W) w = TOC_MAX_W;
-            g_app.tocWidth = w;
-        }
+        /* TOC & PNG preferences */
+        {
+            DWORD type = 0;
+            valSz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"TocVisible", NULL, &type, (LPBYTE)&val, &valSz) == ERROR_SUCCESS &&
+                type == REG_DWORD && valSz == sizeof(DWORD)) {
+                g_app.tocVisible = val ? 1 : 0;
+            }
+            type = 0;
+            valSz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"TocSide", NULL, &type, (LPBYTE)&val, &valSz) == ERROR_SUCCESS &&
+                type == REG_DWORD && valSz == sizeof(DWORD)) {
+                g_app.tocSide = (val == 1) ? 1 : 0;
+            }
+            type = 0;
+            valSz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"TocWidth", NULL, &type, (LPBYTE)&val, &valSz) == ERROR_SUCCESS &&
+                type == REG_DWORD && valSz == sizeof(DWORD)) {
+                int w = (int)val;
+                if (w < TOC_MIN_W) w = TOC_MIN_W;
+                if (w > TOC_MAX_W) w = TOC_MAX_W;
+                g_app.tocWidth = w;
+            }
 
-        /* Recent Files */
-        valSz = sizeof(DWORD);
-        if (RegQueryValueExW(hKey, L"RecentCount", NULL, NULL, (LPBYTE)&val, &valSz) == ERROR_SUCCESS) {
-            int count = (int)val;
-            int i;
-            if (count < 0) count = 0;
-            if (count > MAX_RECENT) count = MAX_RECENT;
-            g_recentCount = 0;
-            for (i = 0; i < count; i++) {
-                wchar_t keyName[32];
-                swprintf_s(keyName, 32, L"RecentFile%d", i);
-                if (win_reg_query_sz(hKey, keyName, g_recentFiles[g_recentCount], LONG_PATH_MAX)) {
-                    g_recentCount++;
+            type = 0;
+            valSz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"PngWidth", NULL, &type, (LPBYTE)&val, &valSz) == ERROR_SUCCESS &&
+                type == REG_DWORD && valSz == sizeof(DWORD)) {
+                int w = (int)val;
+                if (w < 320) w = 320;
+                if (w > 4096) w = 4096;
+                g_app.pngWidth = w;
+            }
+            type = 0;
+            valSz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"PngPaged", NULL, &type, (LPBYTE)&val, &valSz) == ERROR_SUCCESS &&
+                type == REG_DWORD && valSz == sizeof(DWORD)) {
+                g_app.pngPaged = val ? 1 : 0;
+            }
+
+            /* Recent Files */
+            type = 0;
+            valSz = sizeof(DWORD);
+            if (RegQueryValueExW(hKey, L"RecentCount", NULL, &type, (LPBYTE)&val, &valSz) == ERROR_SUCCESS &&
+                type == REG_DWORD && valSz == sizeof(DWORD)) {
+                int count = (int)val;
+                int i;
+                if (count < 0) count = 0;
+                if (count > MAX_RECENT) count = MAX_RECENT;
+                g_recentCount = 0;
+                for (i = 0; i < count; i++) {
+                    wchar_t keyName[32];
+                    _snwprintf_s(keyName, 32, _TRUNCATE, L"RecentFile%d", i);
+                    if (win_reg_query_sz(hKey, keyName, g_recentFiles[g_recentCount], LONG_PATH_MAX)) {
+                        g_recentCount++;
+                    }
                 }
             }
         }
@@ -377,6 +405,8 @@ static void settings_save(void)
         DWORD tVis = (DWORD)(g_app.tocVisible ? 1 : 0);
         DWORD tSide = (DWORD)(g_app.tocSide ? 1 : 0);
         DWORD tWidth = (DWORD)g_app.tocWidth;
+        DWORD pWidth = (DWORD)(g_app.pngWidth > 0 ? g_app.pngWidth : 1050);
+        DWORD pPaged = (DWORD)(g_app.pngPaged ? 1 : 0);
         int i;
 
         win_reg_set_sz(hKey, L"BodyFont", b);
@@ -387,6 +417,8 @@ static void settings_save(void)
         RegSetValueExW(hKey, L"TocVisible", 0, REG_DWORD, (const BYTE *)&tVis, sizeof(DWORD));
         RegSetValueExW(hKey, L"TocSide", 0, REG_DWORD, (const BYTE *)&tSide, sizeof(DWORD));
         RegSetValueExW(hKey, L"TocWidth", 0, REG_DWORD, (const BYTE *)&tWidth, sizeof(DWORD));
+        RegSetValueExW(hKey, L"PngWidth", 0, REG_DWORD, (const BYTE *)&pWidth, sizeof(DWORD));
+        RegSetValueExW(hKey, L"PngPaged", 0, REG_DWORD, (const BYTE *)&pPaged, sizeof(DWORD));
         RegSetValueExW(hKey, L"RecentCount", 0, REG_DWORD, (const BYTE *)&rCount, sizeof(DWORD));
         for (i = 0; i < g_recentCount; i++) {
             wchar_t keyName[32];
@@ -584,6 +616,46 @@ static INT_PTR CALLBACK FontDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM l
             return TRUE;
         }
 
+        case IDCANCEL:
+            EndDialog(hDlg, IDCANCEL);
+            return TRUE;
+        }
+        break;
+    }
+    return FALSE;
+}
+
+static INT_PTR CALLBACK PngExportDlgProc(HWND hDlg, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    (void)lParam;
+    switch (msg) {
+    case WM_INITDIALOG: {
+        int curW = g_app.pngWidth > 0 ? g_app.pngWidth : 1050;
+        if (curW < 320) curW = 320;
+        if (curW > 4096) curW = 4096;
+        SetDlgItemInt(hDlg, IDC_EDIT_PNG_WIDTH, (UINT)curW, FALSE);
+        CheckRadioButton(hDlg, IDC_RADIO_PNG_CONTINUOUS, IDC_RADIO_PNG_PAGED,
+                         g_app.pngPaged ? IDC_RADIO_PNG_PAGED : IDC_RADIO_PNG_CONTINUOUS);
+        return TRUE;
+    }
+
+    case WM_COMMAND:
+        switch (LOWORD(wParam)) {
+        case IDOK: {
+            BOOL ok = FALSE;
+            UINT w = GetDlgItemInt(hDlg, IDC_EDIT_PNG_WIDTH, &ok, FALSE);
+            if (!ok || w < 320 || w > 4096) {
+                MessageBoxW(hDlg, L"가로 폭은 320에서 4096 사이의 픽셀 값을 입력해 주세요.",
+                            L"PNG 내보내기", MB_OK | MB_ICONWARNING);
+                SetFocus(GetDlgItem(hDlg, IDC_EDIT_PNG_WIDTH));
+                return TRUE;
+            }
+            g_app.pngWidth = (int)w;
+            g_app.pngPaged = (IsDlgButtonChecked(hDlg, IDC_RADIO_PNG_PAGED) == BST_CHECKED) ? 1 : 0;
+            settings_save();
+            EndDialog(hDlg, IDOK);
+            return TRUE;
+        }
         case IDCANCEL:
             EndDialog(hDlg, IDCANCEL);
             return TRUE;
@@ -3134,6 +3206,96 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
             return 0;
         }
 
+        case IDM_FILE_EXPORT_PNG: {
+            if (DialogBoxW(GetModuleHandleW(NULL), MAKEINTRESOURCEW(IDD_PNG_DIALOG), hWnd, PngExportDlgProc) == IDOK) {
+                OPENFILENAMEW ofn = {0};
+                wchar_t *fileBuf = (wchar_t *)calloc(LONG_PATH_MAX, sizeof(wchar_t));
+                char err[256] = {0};
+                if (!fileBuf) return 0;
+                if (g_app.currentPath[0]) {
+                    char *defName = path_with_ext(path_name(g_app.currentPath), ".png");
+                    wchar_t *wdef = utf8_to_utf16(defName ? defName : "Document.png", -1, NULL);
+                    if (wdef) {
+                        wcsncpy_s(fileBuf, LONG_PATH_MAX, wdef, _TRUNCATE);
+                        free(wdef);
+                    }
+                    free(defName);
+                } else {
+                    wcscpy_s(fileBuf, LONG_PATH_MAX, L"Document.png");
+                }
+                ofn.lStructSize = sizeof(ofn);
+                ofn.hwndOwner = hWnd;
+                ofn.lpstrFilter = L"PNG 이미지 (*.png)\0*.png\0모든 파일 (*.*)\0*.*\0";
+                ofn.lpstrFile = fileBuf;
+                ofn.nMaxFile = LONG_PATH_MAX;
+                ofn.lpstrDefExt = L"png";
+                ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+                if (GetSaveFileNameW(&ofn)) {
+                    char *u8Out = utf16_to_utf8(fileBuf, -1, NULL);
+                    PngExportOptions pngOpt;
+                    int pagesWritten = 0;
+                    int proceed = (u8Out != NULL);
+                    memset(&pngOpt, 0, sizeof(pngOpt));
+                    pngOpt.width = g_app.pngWidth > 0 ? g_app.pngWidth : 1050;
+                    pngOpt.paged = g_app.pngPaged ? 1 : 0;
+                    pngOpt.dark = g_app.darkMode ? 1 : 0;
+
+                    if (proceed && pngOpt.paged) {
+                        int estPages = export_png_page_count(g_app.doc, &pngOpt);
+                        if (estPages > 50) {
+                            wchar_t warnBuf[160];
+                            _snwprintf_s(warnBuf, 160, _TRUNCATE,
+                                         L"총 %d개의 PNG 파일이 생성됩니다.\n계속하시겠습니까?",
+                                         estPages);
+                            if (MessageBoxW(hWnd, warnBuf, L"PNG 내보내기 경고",
+                                            MB_OKCANCEL | MB_ICONWARNING) != IDOK) {
+                                proceed = 0;
+                            } else {
+                                pngOpt.maxPages = estPages;
+                            }
+                        }
+                        if (proceed && estPages > 1) {
+                            char *conflictPath = (char *)malloc(LONG_PATH_MAX);
+                            if (conflictPath) {
+                                if (export_png_check_overwrite(u8Out, estPages, conflictPath, LONG_PATH_MAX)) {
+                                    wchar_t *wname = utf8_to_utf16(path_name(conflictPath), -1, NULL);
+                                    wchar_t warnBuf[MAX_PATH + 128];
+                                    _snwprintf_s(warnBuf, MAX_PATH + 128, _TRUNCATE,
+                                                 L"기존 분할 이미지 파일(%ls 등)이 이미 있습니다.\n덮어쓰시겠습니까?",
+                                                 wname ? wname : L"*.png");
+                                    free(wname);
+                                    if (MessageBoxW(hWnd, warnBuf, L"덮어쓰기 확인",
+                                                    MB_OKCANCEL | MB_ICONWARNING) != IDOK) {
+                                        proceed = 0;
+                                    }
+                                }
+                                free(conflictPath);
+                            }
+                        }
+                    }
+
+                    if (proceed) {
+                        if (export_png(g_app.doc, u8Out, &pngOpt, &pagesWritten, err, sizeof(err)) == 0) {
+                            if (pagesWritten > 1) {
+                                wchar_t msgBuf[128];
+                                _snwprintf_s(msgBuf, 128, _TRUNCATE, L"%d개의 PNG 파일을 내보냈습니다.", pagesWritten);
+                                MessageBoxW(hWnd, msgBuf, L"완료", MB_OK | MB_ICONINFORMATION);
+                            } else {
+                                MessageBoxW(hWnd, L"PNG 파일을 내보냈습니다.", L"완료", MB_OK | MB_ICONINFORMATION);
+                            }
+                        } else {
+                            wchar_t *werr = err[0] ? utf8_to_utf16(err, -1, NULL) : NULL;
+                            MessageBoxW(hWnd, werr ? werr : L"PNG 내보내기에 실패했습니다.", L"오류", MB_OK | MB_ICONERROR);
+                            free(werr);
+                        }
+                    }
+                    free(u8Out);
+                }
+                free(fileBuf);
+            }
+            return 0;
+        }
+
         case IDM_FILE_REGISTER:
             register_file_association(1);
             MessageBoxW(hWnd, L"*.md 파일의 기본 프로그램으로 등록했습니다.\n이제 .md 파일을 더블 클릭하여 바로 열 수 있습니다.",
@@ -3249,7 +3411,7 @@ static LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lPara
         case IDM_HELP_ABOUT:
             MessageBoxW(hWnd,
                         L"Lilac the Markdown Viewer\n\n"
-                        L"by ym2413-opll, Version 1.4.1.\n",
+                        L"by ym2413-opll, Version 1.5.0.\n",
                         L"정보", MB_OK | MB_ICONINFORMATION);
             return 0;
         }
@@ -3395,6 +3557,8 @@ int WINAPI wWinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     memset(&g_app, 0, sizeof g_app);
     g_app.baseSize = 15.0f;
     g_app.darkMode = 0;
+    g_app.pngWidth = 1050;
+    g_app.pngPaged = 0;
     g_app.paneCount = 1;
     g_app.activePane = 0;
     pane_init(&g_app.panes[0], 1.0f);
